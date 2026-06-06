@@ -1,0 +1,280 @@
+Atlas layout (recommended)
+origin: top-left
+
+Cell
+
+	
+
+Suggested ID
+
+
+
+
+R0 C0
+
+	
+
+sunny
+
+
+
+
+R0 C1
+
+	
+
+mostly_sunny
+
+
+
+
+R0 C2
+
+	
+
+partly_cloudy
+
+
+
+
+R0 C3
+
+	
+
+cloudy
+
+
+
+
+R0 C4
+
+	
+
+fog
+
+
+
+
+R0 C5
+
+	
+
+haze
+
+
+
+
+R1 C0
+
+	
+
+slight_rain
+
+
+
+
+R1 C1
+
+	
+
+rain
+
+
+
+
+R1 C2
+
+	
+
+heavy_rain
+
+
+
+
+R1 C3
+
+	
+
+showers
+
+
+
+
+R1 C4
+
+	
+
+rain_drizzle
+
+
+
+
+R1 C5
+
+	
+
+light_rain
+
+
+
+
+R2 C0
+
+	
+
+thunderstorm
+
+
+
+
+R2 C1
+
+	
+
+heavy_tstorm
+
+
+
+
+R2 C2
+
+	
+
+tstorm
+
+
+
+
+R2 C3
+
+	
+
+isolated_tstorm
+
+
+
+
+R2 C4
+
+	
+
+scattered_tstorms
+
+
+
+
+R2 C5
+
+	
+
+hail
+
+
+
+
+R3 C0
+
+	
+
+rain_snow
+
+
+
+
+R3 C1
+
+	
+
+snow
+
+
+
+
+R3 C2
+
+	
+
+heavy_snow
+
+
+
+
+R3 C3
+
+	
+
+snow_showers
+
+
+
+
+R3 C4
+
+	
+
+flurries
+
+
+
+
+R3 C5
+
+	
+
+windy
+
+
+
+
+R4 C0
+
+	
+
+clear_night
+
+
+
+
+R4 C1
+
+	
+
+mostly_clear_night
+
+
+
+
+R4 C2
+
+	
+
+partly_cloudy_night
+
+
+
+
+R4 C3
+
+	
+
+cloudy_night
+
+
+
+
+R4 C4
+
+	
+
+showers_night
+
+
+
+
+R4 C5
+
+	
+
+tstorm_night
+
+R = row, C = column, both zero-based. So R2 C4 means row 2, column 4.

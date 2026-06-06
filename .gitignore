@@ -1,0 +1,15 @@
+build/
+cmake-build-*/
+.cache/
+*.zip
+*.exe
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+.vs/
+.vscode/
+.claude/
+*.swp
+*~
