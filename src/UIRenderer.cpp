@@ -74,6 +74,48 @@ std::string UIRenderer::formatPrecip(double mm) const {
     return buf;
 }
 
+std::string UIRenderer::formatSnow(double cm) const {
+    char buf[32];
+    if (config_.useFahrenheit()) { // US uses inches (1 cm = 0.393701 in)
+        std::snprintf(buf, sizeof(buf), "%.1f in", cm * 0.393701);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.1f cm", cm);
+    }
+    return buf;
+}
+
+std::string UIRenderer::formatPressure(double hPa) const {
+    char buf[32];
+    if (config_.useFahrenheit()) { // US convention: inches of mercury
+        std::snprintf(buf, sizeof(buf), "%.2f inHg", hPa * 0.0295299830714);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.0f hPa", hPa);
+    }
+    return buf;
+}
+
+std::string UIRenderer::formatVisibility(double meters) const {
+    char buf[32];
+    if (config_.useFahrenheit()) { // US: miles
+        std::snprintf(buf, sizeof(buf), "%.0f mi", meters / 1609.344);
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.0f km", meters / 1000.0);
+    }
+    return buf;
+}
+
+// "2026-06-17T05:23" -> "5:23 AM". Returns "" if it can't parse.
+static std::string formatClock(const std::string& iso) {
+    if (iso.size() < 16) return "";
+    int h = 0, m = 0;
+    if (std::sscanf(iso.c_str() + 11, "%d:%d", &h, &m) != 2) return "";
+    int h12 = h % 12;
+    if (h12 == 0) h12 = 12;
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%d:%02d %s", h12, m, h < 12 ? "AM" : "PM");
+    return buf;
+}
+
 void UIRenderer::render(const WeatherData& data,
                         const std::vector<WeatherAlert>& bannerAlerts,
                         const std::vector<Notification>& history,
@@ -120,9 +162,9 @@ void UIRenderer::render(const WeatherData& data,
         float bodyTotal = ImGui::GetContentRegionAvail().y -
                           ImGui::GetFrameHeightWithSpacing() - 6.0f;
         if (bodyTotal < 200.0f) bodyTotal = 200.0f;
-        float dailyH = bodyTotal * 0.40f;
-        if (dailyH < 190.0f) dailyH = 190.0f;
-        if (dailyH > 260.0f) dailyH = 260.0f;
+        float dailyH = bodyTotal * 0.34f;
+        if (dailyH < 185.0f) dailyH = 185.0f;
+        if (dailyH > 225.0f) dailyH = 225.0f;
         float topH = bodyTotal - dailyH - ImGui::GetStyle().ItemSpacing.y * 2 -
                      2.0f;  // account for the separator rule
         if (topH < 160.0f) topH = 160.0f;
@@ -131,7 +173,7 @@ void UIRenderer::render(const WeatherData& data,
         if (leftW < 230.0f) leftW = 230.0f;
 
         ImGui::BeginChild("current", ImVec2(leftW, topH));
-        renderCurrentConditions(data.current);
+        renderCurrentConditions(data);
         ImGui::EndChild();
 
         ImGui::SameLine();
@@ -288,7 +330,7 @@ void UIRenderer::renderSearchPopup() {
     ImGui::OpenPopup("Search Location");
     ImVec2 center = ImGui::GetMainViewport()->GetCenter();
     ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(350, 300), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(360, 420), ImGuiCond_Appearing);
 
     if (ImGui::BeginPopupModal("Search Location", &showSearchPopup_)) {
         ImGui::Text("Enter city name or zip code:");
@@ -321,11 +363,57 @@ void UIRenderer::renderSearchPopup() {
             }
         }
 
+        ImGui::Separator();
+
+        // Precise, lookup-free entry: type exact coordinates (privacy-centric --
+        // nothing leaves the machine until the forecast itself is fetched).
+        ImGui::Text("Or enter exact coordinates:");
+        ImGui::PushItemWidth(120);
+        ImGui::InputDouble("Lat", &manualLat_, 0.0, 0.0, "%.4f");
+        ImGui::SameLine();
+        ImGui::InputDouble("Lon", &manualLon_, 0.0, 0.0, "%.4f");
+        ImGui::PopItemWidth();
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##label", "Label (optional)", labelBuf_, sizeof(labelBuf_));
+
+        bool validCoords = manualLat_ >= -90.0 && manualLat_ <= 90.0 &&
+                           manualLon_ >= -180.0 && manualLon_ <= 180.0 &&
+                           !(manualLat_ == 0.0 && manualLon_ == 0.0);
+        if (ImGui::Button("Add coordinates") && validCoords) {
+            GeoLocation g;
+            g.name = labelBuf_[0] ? labelBuf_
+                                  : "Custom location";
+            g.latitude = manualLat_;
+            g.longitude = manualLon_;
+            pendingActions_.selectedLocation = g;
+            pendingActions_.addLocationRequested = true;
+            showSearchPopup_ = false;
+            manualLat_ = manualLon_ = 0.0;
+            labelBuf_[0] = '\0';
+        }
+        if (!validCoords && (manualLat_ != 0.0 || manualLon_ != 0.0)) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(lat -90..90, lon -180..180)");
+        }
+
+        ImGui::Separator();
+
+        // One-shot OS geolocation (Windows). Read only when the user clicks.
+        if (ImGui::Button("Detect my location")) {
+            pendingActions_.detectLocationRequested = true;
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(uses your OS location, with permission)");
+        if (!detectStatus_.empty()) {
+            ImGui::TextColored(theme::Amber, "%s", detectStatus_.c_str());
+        }
+
         ImGui::EndPopup();
     }
 }
 
-void UIRenderer::renderCurrentConditions(const CurrentWeather& current) {
+void UIRenderer::renderCurrentConditions(const WeatherData& data) {
+    const CurrentWeather& current = data.current;
     ImGui::Spacing();
 
     float w = ImGui::GetContentRegionAvail().x;
@@ -333,9 +421,9 @@ void UIRenderer::renderCurrentConditions(const CurrentWeather& current) {
     // Large condition sprite, centered at the top (caption is baked in).
     if (iconAtlas_.valid() &&
         weatherCodeToIconCell(current.weatherCode, isNight_) >= 0) {
-        float h = w * 0.46f;
-        if (h < 90.0f) h = 90.0f;
-        if (h > 150.0f) h = 150.0f;
+        float h = w * 0.40f;
+        if (h < 80.0f) h = 80.0f;
+        if (h > 116.0f) h = 116.0f;
         float iw = h * 1.25f;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (w - iw) * 0.5f);
         drawWeatherIcon(current.weatherCode, isNight_, h);
@@ -350,19 +438,104 @@ void UIRenderer::renderCurrentConditions(const CurrentWeather& current) {
     ImGui::SameLine();
     ImGui::TextDisabled("(feels like %s)", formatTemp(current.apparentTemp).c_str());
 
+    // "vs yesterday": today's forecast high against yesterday's (from past_days=1).
+    if (data.hasYesterday && !data.daily.empty()) {
+        double deltaC = data.daily[0].tempMax - data.yesterdayTempMax;
+        double delta = config_.useFahrenheit() ? deltaC * 1.8 : deltaC;
+        if (delta >= 1.0) {
+            ImGui::TextColored(theme::Amber, "Warmer than yesterday (+%.0f high)", delta);
+        } else if (delta <= -1.0) {
+            ImGui::TextColored(theme::Live, "Cooler than yesterday (%.0f high)", delta);
+        } else {
+            ImGui::TextDisabled("About the same as yesterday");
+        }
+    }
+
+    // Minute-by-minute precipitation nowcast ("rain starting in ~N min").
+    PrecipNowcast nc = computePrecipNowcast(data);
+    if (nc.state == NowcastState::RainStarting) {
+        ImGui::TextColored(theme::Amber, "Rain starting in ~%d min", nc.minutes);
+    } else if (nc.state == NowcastState::RainStopping) {
+        ImGui::TextColored(theme::Live, "Rain stopping in ~%d min", nc.minutes);
+    } else if (nc.state == NowcastState::RainOngoing) {
+        ImGui::TextColored(theme::Amber, "Rain continuing for the next 2h");
+    } else if (nc.state == NowcastState::Dry) {
+        ImGui::TextDisabled("No rain in the next 2h");
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Details, one per line. The font is monospace so the colon column aligns.
-    ImGui::Text("Humidity   %.0f%%", current.humidity);
-    ImGui::Text("Wind       %s %s", formatSpeed(current.windSpeed).c_str(),
-                windDirectionToString(current.windDirection));
-    ImGui::Text("Gusts      %s", formatSpeed(current.windGusts).c_str());
-    ImGui::Text("Precip     %s", formatPrecip(current.precipitation).c_str());
-    ImGui::Text("Cloud      %.0f%%", current.cloudCover);
+    // Metrics laid out in two columns to keep the card compact and fully visible.
+    struct Metric { std::string text; ImVec4 color; bool colored; };
+    std::vector<Metric> metrics;
+    auto push = [&](const std::string& t) { metrics.push_back({t, ImVec4(), false}); };
+    auto pushC = [&](const std::string& t, ImVec4 c) { metrics.push_back({t, c, true}); };
+
+    char b[64];
+    std::snprintf(b, sizeof b, "Humidity %.0f%%", current.humidity); push(b);
+    std::snprintf(b, sizeof b, "Dew %s", formatTemp(current.dewPoint).c_str()); push(b);
+    std::snprintf(b, sizeof b, "Wind %s %s", formatSpeed(current.windSpeed).c_str(),
+                  windDirectionToString(current.windDirection)); push(b);
+    std::snprintf(b, sizeof b, "Gusts %s", formatSpeed(current.windGusts).c_str()); push(b);
+    std::snprintf(b, sizeof b, "Precip %s", formatPrecip(current.precipitation).c_str()); push(b);
+    std::snprintf(b, sizeof b, "Cloud %.0f%%", current.cloudCover); push(b);
+    if (current.visibility > 0.0) {
+        std::snprintf(b, sizeof b, "Vis %s", formatVisibility(current.visibility).c_str());
+        push(b);
+    }
     if (current.snowfall > 0) {
-        ImGui::Text("Snow       %.1f cm", current.snowfall);
+        std::snprintf(b, sizeof b, "Snow %s", formatSnow(current.snowfall).c_str());
+        push(b);
+    }
+    if (current.uvIndex >= 0.5) {
+        ImVec4 c = current.uvIndex < 3.0 ? theme::Live
+                 : current.uvIndex < 8.0 ? theme::Amber : theme::Error;
+        std::snprintf(b, sizeof b, "UV %.0f %s", current.uvIndex, uvCategory(current.uvIndex));
+        pushC(b, c);
+    }
+    if (data.airQuality.valid && data.airQuality.usAqi >= 0.0) {
+        double aqi = data.airQuality.usAqi;
+        ImVec4 c = aqi <= 50.0 ? theme::Live : aqi <= 100.0 ? theme::Amber : theme::Error;
+        std::snprintf(b, sizeof b, "Air %.0f %s", aqi, aqiCategory(aqi));
+        pushC(b, c);
+    }
+
+    if (ImGui::BeginTable("curmetrics", 2, ImGuiTableFlags_SizingStretchSame)) {
+        for (const auto& m : metrics) {
+            ImGui::TableNextColumn();
+            if (m.colored) ImGui::TextColored(m.color, "%s", m.text.c_str());
+            else ImGui::TextUnformatted(m.text.c_str());
+        }
+        ImGui::EndTable();
+    }
+
+    // Pressure on its own line so the 3h tendency can be spelled out clearly.
+    if (current.pressure > 0.0) {
+        std::string line = "Pressure " + formatPressure(current.pressure);
+        if (data.hasPressureTrend) {
+            switch (classifyPressureTrend(data.pressureDelta3h)) {
+                case PressureTrend::Rising:  line += " (rising)";  break;
+                case PressureTrend::Falling: line += " (falling)"; break;
+                case PressureTrend::Steady:  line += " (steady)";  break;
+            }
+        }
+        ImGui::TextUnformatted(line.c_str());
+    }
+
+    // Sun times + daylight, compact.
+    if (!data.daily.empty()) {
+        std::string sr = formatClock(data.daily[0].sunrise);
+        std::string ss = formatClock(data.daily[0].sunset);
+        if (!sr.empty() || !ss.empty()) {
+            ImGui::Spacing();
+            ImGui::Text("Sun  %s - %s", sr.c_str(), ss.c_str());
+        }
+        if (data.daily[0].daylightSeconds > 0.0) {
+            int mins = static_cast<int>(data.daily[0].daylightSeconds / 60.0);
+            ImGui::Text("Daylight %dh %02dm", mins / 60, mins % 60);
+        }
     }
 }
 
@@ -390,7 +563,7 @@ static void drawMoon(ImVec2 c, float R, const MoonInfo& m) {
 }
 
 void UIRenderer::renderTonight(const WeatherData& data) {
-    ImGui::TextDisabled("TONIGHT");
+    ImGui::TextDisabled("SKY");
     ImGui::Spacing();
 
     std::time_t now = std::time(nullptr);
@@ -452,6 +625,172 @@ void UIRenderer::renderTonight(const WeatherData& data) {
         }
     }
     ImGui::EndGroup();
+
+    // Sun-path tracker fills the empty space to the right of the sky readout.
+    ImGui::SameLine(0.0f, 24.0f);
+    renderSunTracker(data);
+}
+
+void UIRenderer::renderSunTracker(const WeatherData& data) {
+    if (data.daily.empty()) return;
+    const DailyForecast& today = data.daily[0];
+
+    // Sunrise/sunset as seconds-since-local-midnight.
+    auto parseSod = [](const std::string& iso) -> int {
+        if (iso.size() < 16) return -1;
+        int h = 0, m = 0;
+        if (std::sscanf(iso.c_str() + 11, "%d:%d", &h, &m) != 2) return -1;
+        return h * 3600 + m * 60;
+    };
+    int sr = parseSod(today.sunrise);
+    int ss = parseSod(today.sunset);
+    if (sr < 0 || ss < 0 || ss <= sr) return;  // missing or polar day/night
+
+    // Current location-local time of day.
+    auto nowc = std::chrono::system_clock::now();
+    long long epoch = std::chrono::duration_cast<std::chrono::seconds>(
+                          nowc.time_since_epoch()).count();
+    long long localEpoch = epoch + data.utcOffsetSeconds;
+    int nowSod = static_cast<int>(((localEpoch % 86400) + 86400) % 86400);
+
+    bool isDay = nowSod >= sr && nowSod <= ss;
+    float p = !isDay ? (nowSod < sr ? 0.0f : 1.0f)
+                     : static_cast<float>(nowSod - sr) / static_cast<float>(ss - sr);
+
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    float boxW = std::max(avail.x, 170.0f);
+    float boxH = std::min(std::max(avail.y, 96.0f), 150.0f);
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(ImVec2(boxW, boxH));
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const double PI = 3.14159265358979;
+
+    float cx = origin.x + boxW * 0.5f;
+    float horizonY = origin.y + boxH - 26.0f;  // room for time labels beneath
+    float R = std::min(boxW * 0.5f - 26.0f, boxH - 44.0f);
+    if (R < 24.0f) R = 24.0f;
+
+    const ImU32 arcCol = ImGui::GetColorU32(theme::Muted);
+    const ImU32 horizonCol = ImGui::GetColorU32(theme::Dim);
+    const ImU32 sunCol = ImGui::GetColorU32(theme::Amber);
+    const ImU32 dimSun = ImGui::GetColorU32(theme::hex(0x6B4A2E));
+    const ImU32 txt = ImGui::GetColorU32(theme::Muted);
+
+    // Dome arc from sunrise (left horizon) to sunset (right horizon).
+    const int seg = 40;
+    dl->PathClear();
+    for (int i = 0; i <= seg; ++i) {
+        double th = PI * (1.0 - static_cast<double>(i) / seg);
+        dl->PathLineTo(ImVec2(cx + static_cast<float>(R * std::cos(th)),
+                              horizonY - static_cast<float>(R * std::sin(th))));
+    }
+    dl->PathStroke(arcCol, 0, 1.5f);
+
+    dl->AddLine(ImVec2(cx - R - 8, horizonY), ImVec2(cx + R + 8, horizonY), horizonCol, 1.0f);
+    dl->AddCircleFilled(ImVec2(cx - R, horizonY), 2.5f, horizonCol);
+    dl->AddCircleFilled(ImVec2(cx + R, horizonY), 2.5f, horizonCol);
+
+    // Sun marker: on the arc during the day, dim & below the horizon at night.
+    double th = PI * (1.0 - p);
+    float sx = cx + static_cast<float>(R * std::cos(th));
+    float sy = horizonY - static_cast<float>(R * std::sin(th));
+    if (isDay) {
+        dl->AddCircleFilled(ImVec2(sx, sy), 6.0f, sunCol);
+        for (int k = 0; k < 8; ++k) {
+            double a = k * PI / 4.0;
+            float dx = static_cast<float>(std::cos(a)), dy = static_cast<float>(std::sin(a));
+            dl->AddLine(ImVec2(sx + dx * 8, sy + dy * 8),
+                        ImVec2(sx + dx * 11, sy + dy * 11), sunCol, 1.2f);
+        }
+    } else {
+        float side = (nowSod < sr) ? (cx - R) : (cx + R);
+        dl->AddCircleFilled(ImVec2(side, horizonY + 9.0f), 5.0f, dimSun);
+    }
+
+    // Sunrise / sunset times beneath the two ends.
+    std::string srStr = formatClock(today.sunrise);
+    std::string ssStr = formatClock(today.sunset);
+    dl->AddText(ImVec2(cx - R - ImGui::CalcTextSize(srStr.c_str()).x * 0.5f,
+                       horizonY + 6.0f), txt, srStr.c_str());
+    dl->AddText(ImVec2(cx + R - ImGui::CalcTextSize(ssStr.c_str()).x * 0.5f,
+                       horizonY + 6.0f), txt, ssStr.c_str());
+
+    // Contextual headline: time until the next sun event.
+    int remain;
+    const char* verb;
+    if (isDay) { remain = ss - nowSod; verb = "Sunset in"; }
+    else if (nowSod < sr) { remain = sr - nowSod; verb = "Sunrise in"; }
+    else { remain = (86400 - nowSod) + sr; verb = "Sunrise in"; }
+    char head[48];
+    std::snprintf(head, sizeof head, "%s %dh %02dm", verb, remain / 3600, (remain % 3600) / 60);
+    ImU32 headCol = ImGui::GetColorU32(isDay ? theme::Amber : theme::Accent);
+    dl->AddText(ImVec2(cx - ImGui::CalcTextSize(head).x * 0.5f, origin.y + 2.0f),
+                headCol, head);
+}
+
+void UIRenderer::renderHourlyChart(const std::vector<HourlyForecast>& hourly,
+                                   float colW, float leftPad) {
+    const int n = static_cast<int>(hourly.size());
+    if (n < 2) return;
+
+    const float tempH = 44.0f;
+    const float precipH = 26.0f;
+    const float totalW = leftPad + n * colW;
+
+    // Temperatures in display units + range (with a floor so a flat day still
+    // draws a sensible line rather than a divide-by-zero spike).
+    std::vector<float> temps(n);
+    float tmin = 1e9f, tmax = -1e9f;
+    for (int i = 0; i < n; ++i) {
+        float t = config_.useFahrenheit()
+                      ? static_cast<float>(celsiusToFahrenheit(hourly[i].temperature))
+                      : static_cast<float>(hourly[i].temperature);
+        temps[i] = t;
+        tmin = std::min(tmin, t);
+        tmax = std::max(tmax, t);
+    }
+    if (tmax - tmin < 1.0f) { tmax += 0.5f; tmin -= 0.5f; }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // x of the i-th sample = center of the i-th column, so the chart lines up with
+    // the columns below it and scrolls with them.
+    auto colCenterX = [&](float originX, int i) {
+        return originX + leftPad + (i + 0.5f) * colW;
+    };
+
+    // --- Temperature line ---
+    ImVec2 tOrigin = ImGui::GetCursorScreenPos();
+    const ImU32 lineCol = ImGui::GetColorU32(theme::Accent);
+    const float padTop = 8.0f, padBot = 6.0f;
+    auto yTemp = [&](float t) {
+        float f = (t - tmin) / (tmax - tmin);
+        return tOrigin.y + tempH - padBot - f * (tempH - padTop - padBot);
+    };
+    for (int i = 0; i + 1 < n; ++i) {
+        dl->AddLine(ImVec2(colCenterX(tOrigin.x, i), yTemp(temps[i])),
+                    ImVec2(colCenterX(tOrigin.x, i + 1), yTemp(temps[i + 1])),
+                    lineCol, 2.0f);
+    }
+    for (int i = 0; i < n; ++i)
+        dl->AddCircleFilled(ImVec2(colCenterX(tOrigin.x, i), yTemp(temps[i])), 1.6f, lineCol);
+    ImGui::Dummy(ImVec2(totalW, tempH));
+
+    // --- Precipitation-probability bars ---
+    ImVec2 pOrigin = ImGui::GetCursorScreenPos();
+    const ImU32 barCol = ImGui::GetColorU32(theme::Amber);
+    const ImU32 barBg = ImGui::GetColorU32(theme::hex(0x2A1E18));
+    const float barW = colW * 0.58f;
+    for (int i = 0; i < n; ++i) {
+        float cx = colCenterX(pOrigin.x, i);
+        float prob = static_cast<float>(hourly[i].precipProb) / 100.0f;
+        ImVec2 a(cx - barW * 0.5f, pOrigin.y);
+        ImVec2 b(cx + barW * 0.5f, pOrigin.y + precipH);
+        dl->AddRectFilled(a, b, barBg);
+        if (prob > 0.0f)
+            dl->AddRectFilled(ImVec2(a.x, pOrigin.y + precipH * (1.0f - prob)), b, barCol);
+    }
+    ImGui::Dummy(ImVec2(totalW, precipH));
 }
 
 void UIRenderer::renderHourlyForecast(const std::vector<HourlyForecast>& hourly) {
@@ -460,57 +799,84 @@ void UIRenderer::renderHourlyForecast(const std::vector<HourlyForecast>& hourly)
     ImGui::Text("24-Hour Forecast");
     ImGui::Spacing();
 
-    // Scrollable horizontal region
-    ImGui::BeginChild("hourlyScroll", ImVec2(0, 90), false, ImGuiWindowFlags_HorizontalScrollbar);
+    const int n = static_cast<int>(hourly.size());
 
-    int cols = static_cast<int>(hourly.size());
-    if (ImGui::BeginTable("hourly", cols,
-                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                          ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX)) {
-        for (int i = 0; i < cols; ++i) {
-            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 48.0f);
+    // Everything in this card is positioned from these two constants, so the
+    // chart points, the column dividers, and every text row share one stride and
+    // line up exactly (no auto-sizing table to compress them).
+    const float colW = 52.0f;
+    const float leftPad = 6.0f;
+
+    const ImGuiStyle& st = ImGui::GetStyle();
+    const float lineH = ImGui::GetTextLineHeightWithSpacing();
+    const float chartH = 44.0f + 26.0f + st.ItemSpacing.y * 2;  // temp + precip
+    const float regionH = chartH + lineH * 4 + st.ScrollbarSize + 10.0f;
+
+    // A single horizontally-scrolling region holds the charts and all rows, so
+    // one scrollbar moves them together and the card never scrolls vertically.
+    ImGui::BeginChild("hourlyScroll", ImVec2(0, regionH), false,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+
+    const ImVec2 cardOrigin = ImGui::GetCursorScreenPos();
+    renderHourlyChart(hourly, colW, leftPad);
+    ImGui::Spacing();
+
+    // Faint column dividers behind the rows, on the same stride as the chart.
+    ImVec2 gridTop = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImU32 divider = ImGui::GetColorU32(theme::hex(0x3A2A20));
+    for (int i = 0; i <= n; ++i) {
+        float x = gridTop.x + leftPad + i * colW;
+        dl->AddLine(ImVec2(x, gridTop.y), ImVec2(x, gridTop.y + lineH * 4), divider, 1.0f);
+    }
+
+    // Draw one row of centered cells at the shared column stride.
+    auto row = [&](auto cellText) {
+        for (int i = 0; i < n; ++i) {
+            std::string s = cellText(i);
+            float tw = ImGui::CalcTextSize(s.c_str()).x;
+            float x = leftPad + i * colW + (colW - tw) * 0.5f;
+            if (i == 0) ImGui::SetCursorPosX(x);
+            else ImGui::SameLine(x);
+            ImGui::TextUnformatted(s.c_str());
         }
+    };
 
-        // Time row
-        ImGui::TableNextRow();
-        for (int i = 0; i < cols; ++i) {
-            ImGui::TableSetColumnIndex(i);
-            // Parse hour from "2026-02-25T14:00" -> "2PM"
-            if (hourly[i].time.size() >= 13) {
-                int hour = 0;
-                std::sscanf(hourly[i].time.c_str() + 11, "%d", &hour);
-                if (i == 0) {
-                    ImGui::TextUnformatted("Now");
-                } else {
-                    int h12 = hour % 12;
-                    if (h12 == 0) h12 = 12;
-                    ImGui::Text("%d%s", h12, hour < 12 ? "AM" : "PM");
-                }
+    row([&](int i) -> std::string {
+        if (i == 0) return "Now";
+        int hour = 0;
+        if (hourly[i].time.size() >= 13) std::sscanf(hourly[i].time.c_str() + 11, "%d", &hour);
+        int h12 = hour % 12;
+        if (h12 == 0) h12 = 12;
+        char b[8];
+        std::snprintf(b, sizeof b, "%d%s", h12, hour < 12 ? "AM" : "PM");
+        return b;
+    });
+    row([&](int i) { return formatTemp(hourly[i].temperature); });
+    row([&](int i) { return std::string(weatherCodeToShortString(hourly[i].weatherCode)); });
+    row([&](int i) {
+        char b[8];
+        std::snprintf(b, sizeof b, "%.0f%%", hourly[i].precipProb);
+        return std::string(b);
+    });
+
+    // Whole-column hover: one tooltip for the column under the cursor, covering
+    // the charts and the rows uniformly (the chart is custom-drawn, so it has no
+    // hoverable item of its own).
+    const float cardBottom = ImGui::GetCursorScreenPos().y;
+    if (ImGui::IsWindowHovered()) {
+        ImVec2 mouse = ImGui::GetMousePos();
+        for (int i = 0; i < n; ++i) {
+            float x0 = cardOrigin.x + leftPad + i * colW;
+            if (mouse.x >= x0 && mouse.x < x0 + colW &&
+                mouse.y >= cardOrigin.y && mouse.y < cardBottom) {
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(x0, cardOrigin.y), ImVec2(x0 + colW, cardBottom),
+                    ImGui::GetColorU32(theme::hex(0xFFFFFF, 0.06f)));
+                renderHourlyTooltip(hourly[i]);
+                break;
             }
         }
-
-        // Temperature row
-        ImGui::TableNextRow();
-        for (int i = 0; i < cols; ++i) {
-            ImGui::TableSetColumnIndex(i);
-            ImGui::Text("%s", formatTemp(hourly[i].temperature).c_str());
-        }
-
-        // Condition row
-        ImGui::TableNextRow();
-        for (int i = 0; i < cols; ++i) {
-            ImGui::TableSetColumnIndex(i);
-            ImGui::TextUnformatted(weatherCodeToShortString(hourly[i].weatherCode));
-        }
-
-        // Precip probability row
-        ImGui::TableNextRow();
-        for (int i = 0; i < cols; ++i) {
-            ImGui::TableSetColumnIndex(i);
-            ImGui::Text("%.0f%%", hourly[i].precipProb);
-        }
-
-        ImGui::EndTable();
     }
 
     ImGui::EndChild();
@@ -547,13 +913,23 @@ void UIRenderer::renderDailyForecast(const std::vector<DailyForecast>& daily) {
             }
         }
 
-        // High/Low
+        // High/Low, with a cross-model confidence chip beneath when available.
         ImGui::TableNextRow();
         for (int i = 0; i < cols; ++i) {
             ImGui::TableSetColumnIndex(i);
             ImGui::Text("%s/%s", formatTemp(daily[i].tempMax).c_str(),
                        formatTemp(daily[i].tempMin).c_str());
             if (ImGui::IsItemHovered()) renderDailyTooltip(daily[i]);
+            if (daily[i].hasUncertainty) {
+                double spreadC = std::max(daily[i].tempMaxHigh - daily[i].tempMaxLow,
+                                          daily[i].tempMinHigh - daily[i].tempMinLow);
+                double spread = config_.useFahrenheit() ? spreadC * 1.8 : spreadC;
+                ImVec4 col = spread < 3.0 ? theme::Live
+                           : spread < 7.0 ? theme::Amber : theme::Dim;
+                const char* lbl = spread < 3.0 ? "high" : spread < 7.0 ? "med" : "low";
+                ImGui::TextColored(col, "%s", lbl);
+                if (ImGui::IsItemHovered()) renderDailyTooltip(daily[i]);
+            }
         }
 
         // Condition (weather sprite, day variant; falls back to short text).
@@ -594,6 +970,13 @@ void UIRenderer::renderDailyTooltip(const DailyForecast& day) {
     ImGui::Separator();
     ImGui::Text("High: %s   Low: %s", formatTemp(day.tempMax).c_str(),
                 formatTemp(day.tempMin).c_str());
+    if (day.hasUncertainty) {
+        ImGui::TextDisabled("Model range  high %s-%s, low %s-%s",
+                            formatTemp(day.tempMaxLow).c_str(),
+                            formatTemp(day.tempMaxHigh).c_str(),
+                            formatTemp(day.tempMinLow).c_str(),
+                            formatTemp(day.tempMinHigh).c_str());
+    }
     ImGui::Separator();
     ImGui::Text("Precip Chance: %.0f%%", day.precipProbMax);
     if (day.precipitationSum > 0)
@@ -601,7 +984,43 @@ void UIRenderer::renderDailyTooltip(const DailyForecast& day) {
     if (day.rainSum > 0)
         ImGui::Text("Rain: %s", formatPrecip(day.rainSum).c_str());
     if (day.snowfallSum > 0)
-        ImGui::Text("Snowfall: %.1f cm", day.snowfallSum);
+        ImGui::Text("Snowfall: %s", formatSnow(day.snowfallSum).c_str());
+    if (day.uvIndexMax > 0.0)
+        ImGui::Text("Max UV: %.0f (%s)", day.uvIndexMax, uvCategory(day.uvIndexMax));
+    if (!day.sunrise.empty() || !day.sunset.empty()) {
+        ImGui::Separator();
+        ImGui::Text("Sunrise: %s   Sunset: %s",
+                    formatClock(day.sunrise).c_str(), formatClock(day.sunset).c_str());
+    }
+    ImGui::EndTooltip();
+}
+
+void UIRenderer::renderHourlyTooltip(const HourlyForecast& hr) {
+    ImGui::BeginTooltip();
+
+    // Header: the hour (e.g. "2 PM"), parsed from "2026-06-17T14:00".
+    if (hr.time.size() >= 13) {
+        int hour = 0;
+        std::sscanf(hr.time.c_str() + 11, "%d", &hour);
+        int h12 = hour % 12;
+        if (h12 == 0) h12 = 12;
+        ImGui::Text("%d %s", h12, hour < 12 ? "AM" : "PM");
+        ImGui::Separator();
+    }
+
+    ImGui::Text("Condition: %s", weatherCodeToString(hr.weatherCode));
+    ImGui::Text("Temp: %s", formatTemp(hr.temperature).c_str());
+    ImGui::Text("Precip chance: %.0f%%", hr.precipProb);
+    // Per-hour accumulation -- the smaller-slice breakdown of the daily totals.
+    if (hr.precipitation > 0.0)
+        ImGui::Text("Precip: %s", formatPrecip(hr.precipitation).c_str());
+    if (hr.snowfall > 0.0)
+        ImGui::Text("Snow: %s", formatSnow(hr.snowfall).c_str());
+    if (hr.precipitation <= 0.0 && hr.snowfall <= 0.0)
+        ImGui::TextDisabled("No precipitation");
+    ImGui::Text("Wind: %s %s", formatSpeed(hr.windSpeed).c_str(),
+                windDirectionToString(hr.windDirection));
+
     ImGui::EndTooltip();
 }
 
@@ -659,6 +1078,13 @@ void UIRenderer::renderToasts(const std::vector<WeatherAlert>& alerts) {
         float wrap = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
                      xBtn - ImGui::GetStyle().ItemSpacing.x;
         ImGui::PushTextWrapPos(wrap);
+        if (alert.official) {
+            // Official agency alerts get a source/severity tag above the text.
+            std::string tag = "NWS";
+            if (!alert.severity.empty() && alert.severity != "Unknown")
+                tag += " - " + alert.severity;
+            ImGui::TextColored(theme::Amber, "%s", tag.c_str());
+        }
         ImGui::TextWrapped("%s: %s", alert.title.c_str(), alert.message.c_str());
         ImGui::PopTextWrapPos();
         ImGui::SameLine(ImGui::GetContentRegionMax().x - xBtn);

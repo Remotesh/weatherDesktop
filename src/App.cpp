@@ -1,6 +1,7 @@
 #include "weatherdesktop/App.h"
 #include "weatherdesktop/Theme.h"
 #include "weatherdesktop/Texture.h"
+#include "weatherdesktop/GeoLocator.h"
 
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
@@ -30,6 +31,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <cwchar>
 
 namespace wd {
 
@@ -172,7 +174,7 @@ bool App::initSDL() {
     window_ = SDL_CreateWindow(
         "Weather Desktop",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        900, 640,
+        960, 760,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
     );
     if (!window_) return false;
@@ -329,32 +331,85 @@ void App::requestGeocode(const std::string& query) {
     workQueue_.push(req);
 }
 
+void App::requestDetectLocation() {
+    WorkRequest req;
+    req.type = WorkRequest::DetectLocation;
+    workQueue_.push(req);
+    if (uiRenderer_) uiRenderer_->setDetectStatus("Detecting your location...");
+}
+
 void App::backgroundWorkerLoop() {
     while (backgroundRunning_) {
         WorkRequest req;
         if (workQueue_.waitPopFor(req, std::chrono::seconds(5))) {
-            WorkResult result;
-            result.type = req.type;
+            // shutdown() wakes us with a sentinel request; bail before doing any
+            // work so we don't kick off a bogus fetch and stall the join.
+            if (!backgroundRunning_) break;
 
             if (req.type == WorkRequest::FetchWeather) {
                 auto weatherData = weatherService_.fetchWeather(req.location);
-                if (weatherData) {
-                    result.weatherData = weatherData;
-                    if (req.alertsEnabled) {
-                        result.alerts =
-                            alertEngine_.evaluate(*weatherData, req.useFahrenheit);
-                    }
-                } else {
-                    result.error = "Couldn't reach the weather service - check your connection.";
+                if (!weatherData) {
+                    WorkResult err;
+                    err.type = req.type;
+                    err.error = "Couldn't reach the weather service - check your connection.";
+                    resultQueue_.push(std::move(err));
+                    continue;
                 }
-            } else if (req.type == WorkRequest::Geocode) {
-                result.geocodeResults = weatherService_.geocode(req.query);
-                if (result.geocodeResults.empty()) {
-                    result.error = "No results found";
-                }
-            }
 
-            resultQueue_.push(std::move(result));
+                std::vector<WeatherAlert> derived;
+                if (req.alertsEnabled)
+                    derived = alertEngine_.evaluate(*weatherData, req.useFahrenheit);
+
+                // Phase 1: post the core forecast right away for a fast first paint.
+                {
+                    WorkResult r;
+                    r.type = req.type;
+                    r.weatherData = weatherData;
+                    r.alerts = derived;
+                    resultQueue_.push(std::move(r));
+                }
+
+                if (!backgroundRunning_) continue;
+
+                // Phase 2: best-effort extras (Kp / model band / air quality) plus
+                // official alerts, then re-post the enriched data.
+                weatherService_.enrichWeather(req.location, *weatherData);
+                std::vector<WeatherAlert> alerts;
+                if (req.alertsEnabled) {
+                    // Official (NWS) alerts first so they outrank our derived ones.
+                    alerts = weatherService_.fetchOfficialAlerts(req.location);
+                    alerts.insert(alerts.end(), derived.begin(), derived.end());
+                }
+                WorkResult r2;
+                r2.type = req.type;
+                r2.weatherData = weatherData;
+                r2.alerts = std::move(alerts);
+                resultQueue_.push(std::move(r2));
+
+            } else if (req.type == WorkRequest::Geocode) {
+                WorkResult result;
+                result.type = req.type;
+                result.geocodeResults = weatherService_.geocode(req.query);
+                if (result.geocodeResults.empty()) result.error = "No results found";
+                resultQueue_.push(std::move(result));
+
+            } else if (req.type == WorkRequest::DetectLocation) {
+                WorkResult result;
+                result.type = req.type;
+                DetectedLocation d = detectOSLocation();
+                if (d.ok) {
+                    GeoLocation g;
+                    g.name = "My Location";
+                    g.latitude = d.latitude;
+                    g.longitude = d.longitude;
+                    // Open-Meteo derives the timezone from the coordinates
+                    // (timezone=auto), so we don't need to resolve a name here.
+                    result.detectedLocation = g;
+                } else {
+                    result.error = d.error.empty() ? "Couldn't detect location" : d.error;
+                }
+                resultQueue_.push(std::move(result));
+            }
         }
     }
 }
@@ -377,6 +432,48 @@ void App::updateFromBackground() {
                     currentWeatherData_.location.name;
 #ifdef _WIN32
                 systemTray_.setTooltip(utf8ToWide(tip));
+
+                // Build the on-hover flyout snapshot (unit-aware, pre-formatted).
+                {
+                    const auto& cur = currentWeatherData_.current;
+                    auto wTemp = [&](double c) -> std::wstring {
+                        wchar_t b[24];
+                        if (config_.useFahrenheit())
+                            std::swprintf(b, 24, L"%.0f°F", celsiusToFahrenheit(c));
+                        else
+                            std::swprintf(b, 24, L"%.0f°C", c);
+                        return b;
+                    };
+                    auto wDeg = [&](double c) -> std::wstring {
+                        wchar_t b[16];
+                        std::swprintf(b, 16, L"%.0f°",
+                                      config_.useFahrenheit() ? celsiusToFahrenheit(c) : c);
+                        return b;
+                    };
+                    auto wSpeed = [&](double kmh) -> std::wstring {
+                        wchar_t b[24];
+                        if (config_.useMph()) std::swprintf(b, 24, L"%.0f mph", kmhToMph(kmh));
+                        else std::swprintf(b, 24, L"%.0f km/h", kmh);
+                        return b;
+                    };
+
+                    TrayQuickLook ql;
+                    ql.hasData = true;
+                    ql.location = utf8ToWide(currentWeatherData_.location.displayName());
+                    ql.tempBig = wTemp(cur.temperature);
+                    ql.condition = utf8ToWide(weatherCodeToString(cur.weatherCode));
+                    ql.feels = L"Feels like " + wDeg(cur.apparentTemp);
+                    if (!currentWeatherData_.daily.empty()) {
+                        const auto& d0 = currentWeatherData_.daily[0];
+                        ql.hilo = L"High " + wDeg(d0.tempMax) + L"    Low " + wDeg(d0.tempMin);
+                        wchar_t rb[24];
+                        std::swprintf(rb, 24, L"Rain %.0f%%", d0.precipProbMax);
+                        ql.rain = rb;
+                    }
+                    ql.wind = L"Wind " + wSpeed(cur.windSpeed) + L" " +
+                              utf8ToWide(windDirectionToString(cur.windDirection));
+                    systemTray_.setQuickLook(ql);
+                }
 #else
                 systemTray_.setTooltip(tip);
 #endif
@@ -410,6 +507,17 @@ void App::updateFromBackground() {
         } else if (result.type == WorkRequest::Geocode) {
             if (uiRenderer_) {
                 uiRenderer_->setSearchResults(result.geocodeResults);
+            }
+        } else if (result.type == WorkRequest::DetectLocation) {
+            if (result.detectedLocation) {
+                locationMgr_.addLocation(*result.detectedLocation);
+                locationMgr_.setActive(
+                    static_cast<int>(locationMgr_.locations().size()) - 1);
+                requestWeatherUpdate(locationMgr_.activeLocation().geo);
+                if (uiRenderer_) uiRenderer_->setDetectStatus("");
+            } else if (uiRenderer_) {
+                uiRenderer_->setDetectStatus(
+                    result.error.empty() ? "Couldn't detect location" : result.error);
             }
         }
     }
@@ -507,6 +615,9 @@ void App::processEvents() {
         if (!actions.searchQuery.empty()) {
             requestGeocode(actions.searchQuery);
         }
+        if (actions.detectLocationRequested) {
+            requestDetectLocation();
+        }
         if (actions.addLocationRequested && !actions.selectedLocation.name.empty()) {
             locationMgr_.addLocation(actions.selectedLocation);
             int newIdx = static_cast<int>(locationMgr_.locations().size()) - 1;
@@ -598,8 +709,10 @@ void App::shutdown() {
     if (shutdownDone_) return;
     shutdownDone_ = true;
 
-    // Stop background thread
+    // Stop background thread. Abort any in-flight HTTP transfer first so a fetch
+    // mid-flight doesn't make join() wait out the request timeouts.
     backgroundRunning_ = false;
+    weatherService_.requestAbort();
     workQueue_.push(WorkRequest{}); // wake up the thread
     if (backgroundThread_.joinable()) {
         backgroundThread_.join();

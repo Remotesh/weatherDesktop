@@ -51,6 +51,7 @@ private:
     void backgroundWorkerLoop();
     void requestWeatherUpdate(const GeoLocation& loc, bool isRefresh = false);
     void requestGeocode(const std::string& query);
+    void requestDetectLocation();
 
     // Decide whether to pop tray notifications now, per the scheduler mode.
     // Runs on the UI thread (caller holds no lock).
@@ -94,7 +95,7 @@ private:
 
     // Work queue types
     struct WorkRequest {
-        enum Type { FetchWeather, Geocode };
+        enum Type { FetchWeather, Geocode, DetectLocation };
         Type type;
         GeoLocation location;
         std::string query;
@@ -110,6 +111,7 @@ private:
         std::optional<WeatherData> weatherData;
         std::vector<WeatherAlert> alerts;
         std::vector<GeoLocation> geocodeResults;
+        std::optional<GeoLocation> detectedLocation;  // from DetectLocation
         std::string error;
     };
 

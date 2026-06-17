@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(WeatherDesktop VERSION 0.1.0 LANGUAGES CXX)
+project(WeatherDesktop VERSION 1.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -39,6 +39,7 @@ add_executable(WeatherDesktop
     src/Theme.cpp
     src/Texture.cpp
     src/SkyEvents.cpp
+    src/GeoLocator.cpp
 )
 
 # On Windows, mark as a GUI application (no console window)
@@ -67,6 +68,7 @@ if(WIN32)
         shlwapi
         dwmapi
         windowscodecs   # WIC: decode the weather-icons PNG (see Texture.cpp)
+        runtimeobject   # WinRT ABI: RoInitialize/RoActivateInstance (GeoLocator)
     )
 endif()
 
@@ -77,3 +79,34 @@ add_custom_command(TARGET WeatherDesktop POST_BUILD
             ${CMAKE_SOURCE_DIR}/resources
             $<TARGET_FILE_DIR:WeatherDesktop>/resources
     COMMENT "Copying resources/ next to the executable")
+
+# --- Unit tests ---
+# Builds a separate console test runner over the app's pure logic (no SDL / GL /
+# ImGui). Run with `ctest --test-dir build` or by invoking wd_tests directly.
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(wd_tests
+        test/test_main.cpp
+        test/test_weathertypes.cpp
+        test/test_alertengine.cpp
+        test/test_skyevents.cpp
+        test/test_parsing.cpp
+        test/test_queue.cpp
+        # Units under test (only sources free of SDL/GL/ImGui):
+        src/WeatherTypes.cpp
+        src/AlertEngine.cpp
+        src/SkyEvents.cpp
+        src/WeatherService.cpp
+    )
+    target_include_directories(wd_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/test
+    )
+    # WeatherService.cpp pulls in libcurl + nlohmann_json (it still compiles the
+    # networking code even though the tests only call the pure parsers).
+    target_link_libraries(wd_tests PRIVATE
+        CURL::libcurl
+        nlohmann_json::nlohmann_json
+    )
+    add_test(NAME wd_tests COMMAND wd_tests)
+endif()

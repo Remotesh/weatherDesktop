@@ -15,9 +15,72 @@ std::string GeoLocation::cacheKey() const {
 }
 
 std::string WeatherAlert::deduplicationKey() const {
+    // Official alerts carry a stable agency id; key off that so two distinct
+    // warnings (e.g. Flood + Heat) don't collapse onto one AlertType::Official.
+    if (official && !id.empty()) return "OFFICIAL|" + id;
     return std::to_string(static_cast<int>(type)) + "|" + locationName + "|" +
            std::to_string(std::chrono::duration_cast<std::chrono::hours>(
                timestamp.time_since_epoch()).count() / 24);
+}
+
+PrecipNowcast computePrecipNowcast(const WeatherData& data) {
+    PrecipNowcast nc;
+    const auto& m = data.minutely;
+    if (m.empty()) return nc;  // NoData
+
+    // A 15-min step counts as "wet" above a small threshold so a trace reading
+    // doesn't flip the state. Steps are 15 minutes apart, so step i is ~i*15
+    // minutes out from now (index 0 ~= the current quarter-hour).
+    constexpr double kWet = 0.05;  // mm per 15-min step
+    constexpr int kStepMin = 15;
+
+    bool wetNow = m.front().precipitation > kWet;
+
+    if (wetNow) {
+        for (size_t i = 1; i < m.size(); ++i) {
+            if (m[i].precipitation <= kWet) {
+                nc.state = NowcastState::RainStopping;
+                nc.minutes = static_cast<int>(i) * kStepMin;
+                return nc;
+            }
+        }
+        nc.state = NowcastState::RainOngoing;
+        return nc;
+    }
+
+    for (size_t i = 1; i < m.size(); ++i) {
+        if (m[i].precipitation > kWet) {
+            nc.state = NowcastState::RainStarting;
+            nc.minutes = static_cast<int>(i) * kStepMin;
+            return nc;
+        }
+    }
+    nc.state = NowcastState::Dry;
+    return nc;
+}
+
+const char* uvCategory(double uv) {
+    if (uv < 3.0) return "Low";
+    if (uv < 6.0) return "Moderate";
+    if (uv < 8.0) return "High";
+    if (uv < 11.0) return "Very High";
+    return "Extreme";
+}
+
+const char* aqiCategory(double usAqi) {
+    if (usAqi < 0.0) return "--";
+    if (usAqi <= 50.0) return "Good";
+    if (usAqi <= 100.0) return "Moderate";
+    if (usAqi <= 150.0) return "Unhealthy (Sensitive)";
+    if (usAqi <= 200.0) return "Unhealthy";
+    if (usAqi <= 300.0) return "Very Unhealthy";
+    return "Hazardous";
+}
+
+PressureTrend classifyPressureTrend(double deltaHpa) {
+    if (deltaHpa >= 1.0) return PressureTrend::Rising;
+    if (deltaHpa <= -1.0) return PressureTrend::Falling;
+    return PressureTrend::Steady;
 }
 
 const char* weatherCodeToString(int code) {

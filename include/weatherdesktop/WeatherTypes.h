@@ -33,6 +33,10 @@ struct CurrentWeather {
     double snowfall = 0.0;          // cm
     int weatherCode = 0;            // WMO code
     double cloudCover = 0.0;        // %
+    double pressure = 0.0;          // hPa (mean sea level)
+    double dewPoint = 0.0;          // Celsius
+    double visibility = 0.0;        // meters
+    double uvIndex = 0.0;           // UV index (0..~11+)
     double windSpeed = 0.0;         // km/h
     double windDirection = 0.0;     // degrees
     double windGusts = 0.0;         // km/h
@@ -48,16 +52,50 @@ struct DailyForecast {
     double rainSum = 0.0;           // mm
     double snowfallSum = 0.0;       // cm
     double precipProbMax = 0.0;     // %
+
+    // Cross-model forecast spread for the high/low (Phase 2 confidence band).
+    // hasUncertainty is false when the multi-model call failed or too few models
+    // covered this location/day. The deterministic tempMax/tempMin are clamped to
+    // sit inside their band so the headline number never contradicts the spread.
+    bool hasUncertainty = false;
+    double tempMaxLow = 0.0, tempMaxHigh = 0.0;  // band around tempMax (Celsius)
+    double tempMinLow = 0.0, tempMinHigh = 0.0;  // band around tempMin (Celsius)
+
+    std::string sunrise;            // ISO local "2026-06-17T05:23" ("" if absent)
+    std::string sunset;             // ISO local "2026-06-17T20:54"
+    double uvIndexMax = 0.0;        // peak UV for the day
+    double daylightSeconds = 0.0;   // length of daylight
+};
+
+// One 15-minute step of the precipitation nowcast (radar-blended, next ~2h).
+struct MinutelyForecast {
+    std::string time;               // "2026-06-17T14:15"
+    double precipitation = 0.0;     // mm in this 15-min step
+    int weatherCode = 0;
 };
 
 struct HourlyForecast {
     std::string time;               // "2026-02-25T14:00"
     double temperature = 0.0;       // Celsius
     int weatherCode = 0;
-    double precipitation = 0.0;     // mm
+    double precipitation = 0.0;     // mm (liquid-equivalent for the hour)
+    double snowfall = 0.0;          // cm (snow depth for the hour)
     double precipProb = 0.0;        // %
+    double uvIndex = 0.0;           // UV index for the hour
+    double pressure = 0.0;          // hPa (surface pressure)
     double windSpeed = 0.0;         // km/h
     double windDirection = 0.0;     // degrees
+};
+
+// Air quality snapshot (Open-Meteo Air Quality API, no key). valid==false when
+// the best-effort fetch failed. Negative members mean "not reported".
+struct AirQuality {
+    bool valid = false;
+    double usAqi = -1.0;
+    double europeanAqi = -1.0;
+    double pm2_5 = -1.0;   // ug/m3
+    double pm10 = -1.0;    // ug/m3
+    double ozone = -1.0;   // ug/m3
 };
 
 struct WeatherData {
@@ -65,8 +103,26 @@ struct WeatherData {
     CurrentWeather current;
     std::vector<HourlyForecast> hourly;
     std::vector<DailyForecast> daily;
+    std::vector<MinutelyForecast> minutely;  // 15-min precip nowcast (next ~2h)
+    AirQuality airQuality;
     int utcOffsetSeconds = 0;
     double kpIndex = -1.0;  // NOAA planetary Kp (for aurora); <0 = no data
+
+    // False until the best-effort extras (Kp, model band, air quality) have been
+    // fetched. The core forecast is rendered first; the extras fill in after.
+    bool enriched = false;
+
+    // Barometric tendency over the last 3h, read from hourly surface pressure at
+    // parse time (current minus 3h-ago). hasPressureTrend is false when there
+    // aren't enough past hours to compute it.
+    bool hasPressureTrend = false;
+    double pressureDelta3h = 0.0;   // hPa
+
+    // Yesterday's high/low (from past_days=1) for the "vs yesterday" readout.
+    bool hasYesterday = false;
+    double yesterdayTempMax = 0.0;  // Celsius
+    double yesterdayTempMin = 0.0;
+
     std::chrono::steady_clock::time_point fetchedAt;
 
     bool isValid() const {
@@ -87,7 +143,8 @@ enum class AlertType {
     Snow,
     Hail,
     HighWind,
-    FreezingPrecipitation
+    FreezingPrecipitation,
+    Official   // issued by an official agency (e.g. US NWS), not derived locally
 };
 
 struct WeatherAlert {
@@ -96,6 +153,13 @@ struct WeatherAlert {
     std::string message;
     std::string locationName;
     std::chrono::system_clock::time_point timestamp;
+
+    // Official (agency-issued) alerts. `official` flags them so the UI can rank
+    // and style them above our locally-derived ones; `id` is the agency's stable
+    // identifier, used for deduplication instead of the type+day heuristic.
+    bool official = false;
+    std::string id;
+    std::string severity;  // e.g. "Extreme", "Severe", "Moderate" (official only)
 
     std::string deduplicationKey() const;
 };
@@ -113,6 +177,33 @@ inline double fahrenheitToCelsius(double f) { return (f - 32.0) * 5.0 / 9.0; }
 inline double kmhToMph(double kmh) { return kmh * 0.621371; }
 inline double mphToKmh(double mph) { return mph / 0.621371; }
 inline double mmToInches(double mm) { return mm * 0.0393701; }
+
+// Short-range precipitation nowcast derived from the 15-minute series.
+enum class NowcastState {
+    NoData,        // no minutely data available
+    Dry,           // dry now and staying dry through the window
+    RainStarting,  // dry now, precip begins in `minutes`
+    RainStopping,  // precip now, ends in `minutes`
+    RainOngoing    // precip now and through the whole window
+};
+
+struct PrecipNowcast {
+    NowcastState state = NowcastState::NoData;
+    int minutes = 0;  // minutes until the start/stop transition
+};
+
+// Scan WeatherData::minutely for the next dry<->wet transition (next ~2h).
+PrecipNowcast computePrecipNowcast(const WeatherData& data);
+
+// WHO UV-index band ("Low".."Extreme").
+const char* uvCategory(double uv);
+
+// US AQI band ("Good".."Hazardous"). Returns "--" for a negative/no-data value.
+const char* aqiCategory(double usAqi);
+
+enum class PressureTrend { Falling, Steady, Rising };
+// Classify a 3-hour barometric change (hPa): |delta| < 1 is steady.
+PressureTrend classifyPressureTrend(double deltaHpa);
 
 // WMO weather code to description
 const char* weatherCodeToString(int code);
