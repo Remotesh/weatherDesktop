@@ -22,6 +22,7 @@ public:
     void setActive(int index);
     void addLocation(const GeoLocation& geo);
     void removeLocation(size_t index);
+    void updateActive(const GeoLocation& geo);
 
     // Blocking -- call from background thread
     std::vector<GeoLocation> search(const std::string& query);

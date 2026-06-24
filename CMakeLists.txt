@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(WeatherDesktop VERSION 1.1.0 LANGUAGES CXX)
+project(WeatherDesktop VERSION 1.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,7 @@ add_executable(WeatherDesktop
     src/Texture.cpp
     src/SkyEvents.cpp
     src/GeoLocator.cpp
+    src/RadarView.cpp
 )
 
 # On Windows, mark as a GUI application (no console window)

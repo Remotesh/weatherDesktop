@@ -2,7 +2,10 @@
 #include <nlohmann/json.hpp>
 #include <curl/curl.h>
 #include <sstream>
+#include <iomanip>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <stdexcept>
 
 namespace wd {
@@ -21,6 +24,26 @@ static size_t writeCallback(void* contents, size_t size, size_t nmemb, std::stri
 static int xferCallback(void* clientp, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
     auto* flag = static_cast<std::atomic<bool>*>(clientp);
     return (flag && flag->load()) ? 1 : 0;
+}
+
+// Parse an ISO-8601 timestamp ("2026-06-17T18:00:00-05:00") to a time_point.
+// The timezone offset is ignored (treated as local) -- fine for the day-grained
+// expiry of an official alert. Returns epoch (0) when unparseable.
+static std::chrono::system_clock::time_point parseIsoLocal(const std::string& iso) {
+    int Y, M, D, h = 0, m = 0, s = 0;
+    if (std::sscanf(iso.c_str(), "%d-%d-%dT%d:%d:%d", &Y, &M, &D, &h, &m, &s) < 3)
+        return {};
+    std::tm tm{};
+    tm.tm_year = Y - 1900;
+    tm.tm_mon = M - 1;
+    tm.tm_mday = D;
+    tm.tm_hour = h;
+    tm.tm_min = m;
+    tm.tm_sec = s;
+    tm.tm_isdst = -1;
+    std::time_t t = std::mktime(&tm);
+    if (t == static_cast<std::time_t>(-1)) return {};
+    return std::chrono::system_clock::from_time_t(t);
 }
 
 WeatherService::WeatherService() {}
@@ -65,6 +88,9 @@ std::optional<WeatherData> WeatherService::fetchWeather(const GeoLocation& locat
     }
 
     std::ostringstream url;
+    // Full 6-decimal coordinates (~0.1 m) -- the default ostream precision is
+    // only 6 significant figures, which would truncate the longitude to ~3 dp.
+    url << std::fixed << std::setprecision(6);
     url << "https://api.open-meteo.com/v1/forecast?"
         << "latitude=" << location.latitude
         << "&longitude=" << location.longitude
@@ -118,6 +144,9 @@ void WeatherService::enrichWeather(const GeoLocation& location, WeatherData& dat
     data.kpIndex = fetchKpIndex();          // best-effort; -1 if unavailable
     fetchUncertaintyBand(location, data);   // best-effort confidence band
     fetchAirQuality(location, data);        // best-effort air quality
+    fetchClimateNormals(location, data);    // best-effort historical normals
+    fetchTidesAndMarine(location, data);    // best-effort tides + wave height
+    fetchForecastDiscussion(location, data);// best-effort NWS AFD (US, runs last)
     data.enriched = true;
 
     // Update the cached entry so a later cache hit carries the extras too.
@@ -343,6 +372,7 @@ void WeatherService::fetchUncertaintyBand(const GeoLocation& loc, WeatherData& d
     // one suffixed column per model (e.g. temperature_2m_max_gfs_seamless); the
     // spread across them is a cheap, key-free proxy for forecast confidence.
     std::ostringstream url;
+    url << std::fixed << std::setprecision(6);
     url << "https://api.open-meteo.com/v1/forecast?"
         << "latitude=" << loc.latitude
         << "&longitude=" << loc.longitude
@@ -415,6 +445,7 @@ std::vector<WeatherAlert> WeatherService::fetchOfficialAlerts(const GeoLocation&
     }
 
     std::ostringstream url;
+    url << std::fixed << std::setprecision(6);
     url << "https://api.weather.gov/alerts/active?status=actual&message_type=alert"
         << "&point=" << loc.latitude << "," << loc.longitude;
 
@@ -433,6 +464,9 @@ std::vector<WeatherAlert> WeatherService::fetchOfficialAlerts(const GeoLocation&
                     a.official = true;
                     a.id = p.value("id", f.value("id", std::string{}));
                     a.severity = p.value("severity", std::string{});
+                    // Expire the notification when the alert itself does.
+                    a.validUntil = parseIsoLocal(
+                        p.value("ends", p.value("expires", std::string{})));
                     a.title = p.value("event", std::string("Weather Alert"));
                     // Prefer the short headline; fall back to the area description.
                     a.message = p.value("headline", std::string{});
@@ -456,10 +490,12 @@ std::vector<WeatherAlert> WeatherService::fetchOfficialAlerts(const GeoLocation&
 
 void WeatherService::fetchAirQuality(const GeoLocation& loc, WeatherData& data) {
     std::ostringstream url;
+    url << std::fixed << std::setprecision(6);
     url << "https://air-quality-api.open-meteo.com/v1/air-quality?"
         << "latitude=" << loc.latitude
         << "&longitude=" << loc.longitude
-        << "&current=us_aqi,european_aqi,pm2_5,pm10,ozone"
+        << "&current=us_aqi,european_aqi,pm2_5,pm10,ozone,"
+        << "nitrogen_dioxide,sulphur_dioxide,carbon_monoxide"
         << "&timezone=auto";
     std::string resp = httpGet(url.str());
     if (resp.empty()) return;
@@ -480,9 +516,246 @@ AirQuality WeatherService::parseAirQuality(const std::string& jsonStr) {
     aq.pm2_5 = c.value("pm2_5", -1.0);
     aq.pm10 = c.value("pm10", -1.0);
     aq.ozone = c.value("ozone", -1.0);
+    aq.no2 = c.value("nitrogen_dioxide", -1.0);
+    aq.so2 = c.value("sulphur_dioxide", -1.0);
+    aq.co = c.value("carbon_monoxide", -1.0);
     // Consider the snapshot usable if at least one AQI index came back.
     aq.valid = (aq.usAqi >= 0.0 || aq.europeanAqi >= 0.0);
     return aq;
+}
+
+// Great-circle distance in km.
+static double haversineKm(double lat1, double lon1, double lat2, double lon2) {
+    const double R = 6371.0, d2r = 3.14159265358979 / 180.0;
+    double dlat = (lat2 - lat1) * d2r, dlon = (lon2 - lon1) * d2r;
+    double a = std::sin(dlat / 2) * std::sin(dlat / 2) +
+               std::cos(lat1 * d2r) * std::cos(lat2 * d2r) *
+                   std::sin(dlon / 2) * std::sin(dlon / 2);
+    return 2.0 * R * std::asin(std::min(1.0, std::sqrt(a)));
+}
+
+ClimateNormals WeatherService::parseClimateNormals(const std::string& jsonStr,
+                                                   const std::string& monthDay) {
+    ClimateNormals n;
+    json j = json::parse(jsonStr);
+    if (j.value("error", false) || !j.contains("daily")) return n;
+    auto& d = j["daily"];
+    auto dates = d.value("time", std::vector<std::string>{});
+    if (!d.contains("temperature_2m_max") || !d.contains("temperature_2m_min")) return n;
+    auto& hi = d["temperature_2m_max"];
+    auto& lo = d["temperature_2m_min"];
+
+    double sumHi = 0, sumLo = 0;
+    int cnt = 0;
+    for (size_t i = 0; i < dates.size(); ++i) {
+        if (dates[i].size() < 10 || dates[i].substr(5, 5) != monthDay) continue;
+        if (i < hi.size() && i < lo.size() && hi[i].is_number() && lo[i].is_number()) {
+            sumHi += hi[i].get<double>();
+            sumLo += lo[i].get<double>();
+            ++cnt;
+        }
+    }
+    if (cnt > 0) {
+        n.valid = true;
+        n.normalHighC = sumHi / cnt;
+        n.normalLowC = sumLo / cnt;
+    }
+    return n;
+}
+
+void WeatherService::fetchClimateNormals(const GeoLocation& loc, WeatherData& data) {
+    std::string monthDay;
+    if (!data.daily.empty() && data.daily[0].date.size() >= 10)
+        monthDay = data.daily[0].date.substr(5, 5);
+    if (monthDay.empty()) return;
+
+    std::ostringstream url;
+    url << std::fixed << std::setprecision(6);
+    url << "https://archive-api.open-meteo.com/v1/archive?"
+        << "latitude=" << loc.latitude << "&longitude=" << loc.longitude
+        << "&start_date=2014-01-01&end_date=2023-12-31"
+        << "&daily=temperature_2m_max,temperature_2m_min&timezone=auto";
+    std::string resp = httpGet(url.str());
+    if (resp.empty()) return;
+    try {
+        data.normals = parseClimateNormals(resp, monthDay);
+    } catch (...) {
+    }
+}
+
+void WeatherService::fetchTidesAndMarine(const GeoLocation& loc, WeatherData& data) {
+    TideInfo t;
+
+    // Wave height -- global (Open-Meteo Marine); inland points just error out.
+    {
+        std::ostringstream url;
+        url << std::fixed << std::setprecision(6);
+        url << "https://marine-api.open-meteo.com/v1/marine?"
+            << "latitude=" << loc.latitude << "&longitude=" << loc.longitude
+            << "&current=wave_height&timezone=auto";
+        std::string resp = httpGet(url.str());
+        if (!resp.empty()) {
+            try {
+                json j = json::parse(resp);
+                if (!j.value("error", false) && j.contains("current")) {
+                    double wh = j["current"].value("wave_height", -1.0);
+                    if (wh >= 0.0) { t.waveHeightM = wh; t.valid = true; }
+                }
+            } catch (...) {
+            }
+        }
+    }
+
+    // Tides -- US only (NOAA CO-OPS). Load the station list once per session.
+    if (loc.country == "US" || loc.country == "United States") {
+        {
+            std::lock_guard<std::mutex> lock(tideStationsMutex_);
+            if (!tideStationsLoaded_) {
+                tideStationsLoaded_ = true;  // one attempt per session
+                std::string resp = httpGet(
+                    "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/"
+                    "stations.json?type=tidepredictions");
+                if (!resp.empty()) {
+                    try {
+                        json j = json::parse(resp);
+                        if (j.contains("stations")) {
+                            for (auto& s : j["stations"]) {
+                                TideStation ts;
+                                ts.id = s.value("id", std::string{});
+                                ts.name = s.value("name", std::string{});
+                                ts.lat = s.value("lat", 0.0);
+                                ts.lng = s.value("lng", 0.0);
+                                if (!ts.id.empty()) tideStations_.push_back(ts);
+                            }
+                        }
+                    } catch (...) {
+                    }
+                }
+            }
+        }
+
+        std::string stationId, stationName;
+        double bestKm = 1e9;
+        {
+            std::lock_guard<std::mutex> lock(tideStationsMutex_);
+            for (const auto& s : tideStations_) {
+                double dkm = haversineKm(loc.latitude, loc.longitude, s.lat, s.lng);
+                if (dkm < bestKm) { bestKm = dkm; stationId = s.id; stationName = s.name; }
+            }
+        }
+
+        if (!stationId.empty() && bestKm <= 100.0 && !data.daily.empty() &&
+            data.daily[0].date.size() >= 10) {
+            std::string ymd = data.daily[0].date.substr(0, 4) +
+                              data.daily[0].date.substr(5, 2) +
+                              data.daily[0].date.substr(8, 2);
+            std::ostringstream url;
+            url << "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?"
+                << "product=predictions&application=WeatherDesktop&datum=MLLW"
+                << "&interval=hilo&units=metric&time_zone=lst_ldt&format=json"
+                << "&begin_date=" << ymd << "&range=36&station=" << stationId;
+            std::string resp = httpGet(url.str());
+            if (!resp.empty()) {
+                try {
+                    json j = json::parse(resp);
+                    if (j.contains("predictions")) {
+                        for (auto& p : j["predictions"]) {
+                            if (t.events.size() >= 4) break;
+                            TideEvent ev;
+                            std::string ts = p.value("t", std::string{});  // "YYYY-MM-DD HH:MM"
+                            int h = 0, m = 0;
+                            if (ts.size() >= 16 &&
+                                std::sscanf(ts.c_str() + 11, "%d:%d", &h, &m) == 2) {
+                                int h12 = h % 12; if (h12 == 0) h12 = 12;
+                                char tb[16];
+                                std::snprintf(tb, sizeof tb, "%d:%02d %s", h12, m,
+                                              h < 12 ? "AM" : "PM");
+                                ev.time = tb;
+                            }
+                            ev.high = p.value("type", std::string{}) == "H";
+                            try { ev.heightM = std::stod(p.value("v", std::string("0"))); }
+                            catch (...) { ev.heightM = 0.0; }
+                            t.events.push_back(ev);
+                        }
+                    }
+                } catch (...) {
+                }
+                if (!t.events.empty()) {
+                    t.hasTides = true;
+                    t.stationName = stationName;
+                    t.valid = true;
+                }
+            }
+        }
+    }
+
+    data.tides = t;
+}
+
+void WeatherService::fetchForecastDiscussion(const GeoLocation& loc, WeatherData& data) {
+    if (loc.country != "US" && loc.country != "United States") return;
+
+    // Point -> issuing office.
+    std::ostringstream purl;
+    purl << std::fixed << std::setprecision(6);
+    purl << "https://api.weather.gov/points/" << loc.latitude << "," << loc.longitude;
+    std::string presp = httpGet(purl.str());
+    if (presp.empty()) return;
+    std::string office;
+    try {
+        json pj = json::parse(presp);
+        if (pj.contains("properties")) {
+            office = pj["properties"].value("cwa", std::string{});
+            if (office.empty()) office = pj["properties"].value("gridId", std::string{});
+        }
+    } catch (...) { return; }
+    if (office.empty()) return;
+
+    // Cache by office (~30 min).
+    {
+        std::lock_guard<std::mutex> lock(afdCacheMutex_);
+        auto it = afdCache_.find(office);
+        if (it != afdCache_.end()) {
+            auto age = std::chrono::steady_clock::now() - it->second.fetchedAt;
+            if (std::chrono::duration_cast<std::chrono::minutes>(age).count() < 30) {
+                data.afdText = it->second.text;
+                data.afdOffice = it->second.office;
+                data.afdIssued = it->second.issued;
+                return;
+            }
+        }
+    }
+
+    // Latest AFD product id for that office.
+    std::string lresp =
+        httpGet("https://api.weather.gov/products/types/AFD/locations/" + office);
+    if (lresp.empty()) return;
+    std::string prodId, issued;
+    try {
+        json lj = json::parse(lresp);
+        if (lj.contains("@graph") && lj["@graph"].is_array() && !lj["@graph"].empty()) {
+            auto& g0 = lj["@graph"][0];
+            prodId = g0.value("@id", std::string{});
+            issued = g0.value("issuanceTime", std::string{});
+        }
+    } catch (...) { return; }
+    if (prodId.empty()) return;
+
+    // The product text itself.
+    std::string prresp = httpGet(prodId);
+    if (prresp.empty()) return;
+    std::string text;
+    try {
+        json prj = json::parse(prresp);
+        text = prj.value("productText", std::string{});
+    } catch (...) { return; }
+    if (text.empty()) return;
+
+    data.afdText = text;
+    data.afdOffice = office;
+    data.afdIssued = issued;
+    std::lock_guard<std::mutex> lock(afdCacheMutex_);
+    afdCache_[office] = {std::chrono::steady_clock::now(), text, office, issued};
 }
 
 std::vector<GeoLocation> WeatherService::parseGeocodeResponse(const std::string& jsonStr) {

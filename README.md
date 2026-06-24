@@ -2,9 +2,11 @@
 
 A small, native **Windows weather app** for the desktop — current conditions, a
 24-hour and 7-day forecast with pixel-art weather icons, official + derived
-weather alerts, air quality, a minute-by-minute rain nowcast, and a "Sky" panel
-with a sunrise→sunset arc, moon phase, aurora odds, and meteor showers. It lives
-in the system tray and shows a quick-look card on hover.
+weather alerts, air quality, a minute-by-minute rain nowcast, an **in-app weather
+radar**, and a rotating "Sky" panel with a sunrise→sunset arc, moon phase, aurora
+odds, meteor showers, air quality, the NWS forecast discussion, almanac normals,
+and tides. Light/dark themes. It lives in the system tray and shows a quick-look
+card on hover.
 
 ![Weather Desktop](docs/screenshot.png)
 
@@ -30,14 +32,22 @@ K-index feed.
   precipitation), surfaced as floating toasts and OS notifications.
 - **Notification scheduling** — deliver alerts as they happen, only outside quiet
   hours, or as a once-a-day digest; a notification center keeps the history.
-- **Sky panel** — a **sunrise→sunset arc** with the sun at the current time and a
-  contextual "Sunset/Sunrise in …" headline, the moon phase (with illumination),
-  aurora chance for your latitude, and active meteor showers.
+- **Weather radar** — an in-app, animated radar overlay ([RainViewer](https://www.rainviewer.com/)
+  past + nowcast frames) with play/scrub, per-frame timestamps, drag-pan and
+  wheel-zoom, an on-map wind gauge, and a locally-drawn **Natural Earth basemap**
+  (coastlines, state/country/county lines, interstates, city labels) — so only
+  RainViewer sees the viewport.
+- **Sky carousel** — an auto-cycling panel (pauses on hover) rotating through a
+  **sunrise→sunset arc** (sun at the current time, moon phase, aurora odds, meteor
+  showers), an **air-quality** breakdown, the **NWS Area Forecast Discussion**,
+  an **almanac** (today vs. the 1991–2020 normal), and **tides & marine**.
+- **Daily takeaway** — a one-line plain-language summary of the day atop the
+  current conditions.
 - **Tray quick-look** — hover the tray icon for a compact card (temp, condition,
   feels-like, high/low, wind, rain) without opening the window.
-- **Locations** — search by city/zip, enter exact coordinates, or detect your
-  location via the OS (Windows); °F/°C + mph/km-h, "vs yesterday" comparison,
-  start-minimized, and a system-tray presence.
+- **Locations & look** — search by city/zip, enter exact coordinates, or detect
+  your location via the OS (Windows); light/dark **themes**; °F/°C + mph/km-h,
+  "vs yesterday" comparison, start-minimized, and a system-tray presence.
 
 ## Build (Windows, MSYS2 / mingw-w64)
 
@@ -74,7 +84,11 @@ ctest --test-dir build --output-on-failure
 
 - Font: **Kenney Space** ([kenney.nl](https://kenney.nl/), CC0).
 - Weather and moon-phase sprite sheets © their author, included with the app.
-- Weather / air quality: Open-Meteo. Official alerts: US NWS. Space weather: NOAA SWPC.
+- Weather, air quality, marine and climate data: **[Open-Meteo](https://open-meteo.com/)**
+  (CC BY 4.0). Official alerts & forecast discussion: **US NWS**. Tides: **NOAA CO-OPS**.
+  Space weather: **NOAA SWPC**.
+- Weather radar: **[RainViewer](https://www.rainviewer.com/)**. Radar basemap:
+  **[Natural Earth](https://www.naturalearthdata.com/)** (public domain).
 
 ## License
 

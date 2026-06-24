@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.2.0 — 2026-06-23
+
+An in-app weather radar, a rotating info carousel, and light/dark themes.
+
+### Added
+- **Weather radar** — an in-app, animated radar overlay (RainViewer past +
+  nowcast frames) with play/scrub controls and per-frame timestamps ("2:10 PM
+  (-20 min)" / "+30 min forecast"). Drag to pan, wheel to zoom. A locally-drawn
+  **Natural Earth basemap** (coastlines, state, country and US county lines,
+  interstates/motorways, and city labels) means only RainViewer ever sees the
+  viewport. Includes an on-map **wind gauge** for the centered location.
+  - Tiles are fetched on a small connection-reused pool with rate-limit backoff;
+    deep zoom **upscales the nearest data instead of going blank**, so the view is
+    never empty even past the radar's native resolution.
+- **Auto-cycling SKY carousel** — the Sky panel rotates through Sky / Air /
+  Discussion / Almanac / Tides cards (pauses on hover), surfacing:
+  - **Air quality breakdown** — US AQI with a pollutant table and health guidance.
+  - **Forecast discussion** — the NWS Area Forecast Discussion narrative (US).
+  - **Almanac** — today vs. the 1991–2020 climate normal.
+  - **Tides & marine** — next high/low tide (NOAA, US) and wave height.
+- **Daily takeaway** — a one-line plain-language summary atop the current
+  conditions, which now split into a static header + a scrollable metrics list.
+- **Rain push alerts** — a notification when rain is about to start; **clicking a
+  notification opens the app**.
+- **Light / dark themes** — selectable in Settings (window chrome included).
+
 ## v1.1.0 — 2026-06-17
 
 More accurate data, more useful panels, and a faster, snappier app.

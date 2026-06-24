@@ -7,6 +7,7 @@
 #include "NotificationManager.h"
 #include "SystemTray.h"
 #include "UIRenderer.h"
+#include "RadarView.h"
 #include "ThreadSafeQueue.h"
 #include "WeatherTypes.h"
 
@@ -46,6 +47,7 @@ private:
     void processEvents();
     void updateFromBackground();
     void renderFrame();
+    void applyTheme();  // set ImGui palette + native title-bar colors from config
 
     // Background worker
     void backgroundWorkerLoop();
@@ -56,6 +58,10 @@ private:
     // Decide whether to pop tray notifications now, per the scheduler mode.
     // Runs on the UI thread (caller holds no lock).
     void maybeNotify();
+
+    // Drop notifications whose event day has fully passed (so they stop counting
+    // toward the unread badge and leave the notification center).
+    void pruneStaleNotifications();
 
     // State
     SDL_Window* window_ = nullptr;
@@ -72,6 +78,7 @@ private:
     NotificationManager notificationMgr_;
     SystemTray systemTray_;
     UIRenderer* uiRenderer_ = nullptr;
+    RadarView radar_;
 
     // Threading
     std::thread backgroundThread_;
@@ -92,6 +99,7 @@ private:
     std::set<std::string> acknowledged_;
     std::set<std::string> unpoppedKeys_;
     int lastDigestDay_ = -1;  // yday of the last digest pop (avoid repeats)
+    std::string lastRainPushKey_;  // onset id of the last rain-imminent push
 
     // Work queue types
     struct WorkRequest {

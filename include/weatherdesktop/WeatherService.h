@@ -42,6 +42,10 @@ public:
     static WeatherData parseWeatherResponse(const std::string& json, const GeoLocation& loc);
     static std::vector<GeoLocation> parseGeocodeResponse(const std::string& json);
     static AirQuality parseAirQuality(const std::string& json);
+    // Average the archive daily series for entries whose date matches monthDay
+    // ("MM-DD") -> climate normal high/low. Exposed for testing.
+    static ClimateNormals parseClimateNormals(const std::string& json,
+                                              const std::string& monthDay);
 
 private:
     std::string httpGet(const std::string& url);
@@ -56,6 +60,11 @@ private:
     // Best-effort Air Quality API call (no key). Leaves airQuality.valid=false on
     // failure.
     void fetchAirQuality(const GeoLocation& loc, WeatherData& data);
+    // More best-effort enrichers (all no-key, all leave their field empty/invalid
+    // on failure so the matching carousel card just hides).
+    void fetchClimateNormals(const GeoLocation& loc, WeatherData& data);
+    void fetchTidesAndMarine(const GeoLocation& loc, WeatherData& data);
+    void fetchForecastDiscussion(const GeoLocation& loc, WeatherData& data);  // US NWS AFD
 
     std::unordered_map<std::string, WeatherData> cache_;
     mutable std::mutex cacheMutex_;
@@ -69,6 +78,20 @@ private:
     };
     std::unordered_map<std::string, AlertCacheEntry> alertsCache_;
     mutable std::mutex alertsCacheMutex_;
+
+    // AFD text cached per WFO office (~30 min); NOAA tide-prediction station list
+    // fetched once per session and reused to find the nearest coastal station.
+    struct AfdCacheEntry {
+        std::chrono::steady_clock::time_point fetchedAt;
+        std::string text, office, issued;
+    };
+    std::unordered_map<std::string, AfdCacheEntry> afdCache_;
+    mutable std::mutex afdCacheMutex_;
+
+    struct TideStation { std::string id, name; double lat = 0.0, lng = 0.0; };
+    std::vector<TideStation> tideStations_;
+    bool tideStationsLoaded_ = false;
+    mutable std::mutex tideStationsMutex_;
 };
 
 } // namespace wd

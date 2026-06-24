@@ -89,3 +89,43 @@ TEST_CASE(alert_temperature_swing) {
     d.daily = {day(1, 10, 5), day(1, 22, 16)};
     CHECK(hasType(engine.evaluate(d, true), AlertType::TemperatureSwing));
 }
+
+TEST_CASE(alert_has_valid_until) {
+    AlertEngine engine;
+    WeatherData d = calmDay();
+    d.current.weatherCode = 95;  // severe -> at least one alert
+    auto alerts = engine.evaluate(d, true);
+    CHECK(!alerts.empty());
+    for (const auto& a : alerts)
+        CHECK(a.validUntil.time_since_epoch().count() != 0);  // expiry stamped
+}
+
+TEST_CASE(skyevent_meteor_near_peak) {
+    AlertEngine engine;
+    WeatherData d;
+    d.location.name = "Testville";
+    d.location.latitude = 45.0;
+    d.kpIndex = -1.0;  // no aurora, isolate the meteor path
+    std::time_t aug12 = 1628769600;  // 2021-08-12 12:00 UTC -> Perseids near peak
+    auto sky = engine.evaluateSkyEvents(d, aug12);
+
+    bool foundMeteor = false;
+    for (const auto& a : sky) {
+        if (a.type == AlertType::SkyEvent &&
+            std::string(a.message).find("Perseids") != std::string::npos) {
+            foundMeteor = true;
+            CHECK(a.validUntil.time_since_epoch().count() != 0);
+        }
+    }
+    CHECK(foundMeteor);
+}
+
+TEST_CASE(skyevent_quiet_night_is_silent) {
+    AlertEngine engine;
+    WeatherData d;
+    d.location.latitude = 45.0;
+    d.kpIndex = -1.0;
+    // Early March: no major shower active (between Quadrantids and the Lyrids).
+    std::time_t mar01 = 1614600000;  // 2021-03-01 12:00 UTC
+    CHECK(engine.evaluateSkyEvents(d, mar01).empty());
+}

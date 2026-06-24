@@ -20,6 +20,9 @@ struct UIActions {
     bool addLocationRequested = false;
     bool removeLocationRequested = false;
     bool detectLocationRequested = false;  // one-shot OS geolocation
+    bool editRequested = false;            // edit the active location (name/coords)
+    GeoLocation editLocation;              // the edited values to apply
+    bool openRadarRequested = false;       // open the radar overlay
     bool quitRequested = false;
     bool settingsChanged = false;
     std::string acknowledgeKey;       // dedup key the user dismissed from banner
@@ -48,11 +51,20 @@ public:
 private:
     void renderLocationBar(const WeatherData& data, int unreadCount);
     void renderSearchPopup();
-    void renderCurrentConditions(const WeatherData& data);
-    void renderTonight(const WeatherData& data);  // moon / meteors / aurora
+    void renderEditPopup();
+    void renderCurrentConditions(const WeatherData& data);  // dispatches to the two below
+    void renderCurrentHeader(const WeatherData& data);      // static: icon/temp/takeaway
+    void renderCurrentMetrics(const WeatherData& data);     // scrollable: metrics blob
+    // The SKY panel is an auto-cycling tabbed carousel ("weather-channel" rotation)
+    // of focus cards; renderSkyCarousel draws the tab strip + the active card.
+    void renderSkyCarousel(const WeatherData& data);
+    void renderSkyCardSky(const WeatherData& data);         // moon / sun arc / aurora / meteors
+    void renderSkyCardAir(const WeatherData& data);         // AQI + pollutant breakdown
+    void renderSkyCardDiscussion(const WeatherData& data);  // NWS forecast discussion
+    void renderSkyCardAlmanac(const WeatherData& data);     // historical normals
+    void renderSkyCardTides(const WeatherData& data);       // tides + waves
     // Sun-path arc (sunrise->sunset) with the sun at the current time and a
-    // contextual "Sunset/Sunrise in ..." headline. Drawn to the right of the
-    // moon/sky readout, filling the otherwise-empty panel space.
+    // contextual "Sunset/Sunrise in ..." headline.
     void renderSunTracker(const WeatherData& data);
     void renderHourlyForecast(const std::vector<HourlyForecast>& hourly);
     // Column-aligned trend charts (temperature line + precip bars). colW/leftPad
@@ -90,6 +102,10 @@ private:
 
     char searchBuf_[256] = {};
     bool showSearchPopup_ = false;
+    bool showEdit_ = false;
+    char editNameBuf_[128] = {};
+    double editLat_ = 0.0;
+    double editLon_ = 0.0;
     bool showSettings_ = false;
     bool showNotifications_ = false;
     std::vector<GeoLocation> searchResults_;
@@ -104,6 +120,13 @@ private:
     Texture iconAtlas_;     // 6x5 weather sprite sheet
     Texture moonAtlas_;     // 5x3 moon-phase sprite sheet
     bool isNight_ = false;  // computed per-frame from the location's local time
+
+    // SKY carousel state. The set of available cards is rebuilt each frame (some
+    // depend on data being present); skyCard_ indexes into that per-frame list.
+    enum class SkyCard { Sky, Air, Discussion, Almanac, Tides };
+    int skyCard_ = 0;
+    bool skyAutoAdvance_ = true;  // cleared when the user picks a tab
+    float skyDwell_ = 0.0f;       // seconds shown on the current card
 };
 
 } // namespace wd

@@ -49,6 +49,10 @@ void LocationManager::removeLocation(size_t index) {
     config_.removeLocation(index);
 }
 
+void LocationManager::updateActive(const GeoLocation& geo) {
+    config_.updateLocation(static_cast<size_t>(config_.activeLocationIndex()), geo);
+}
+
 std::vector<GeoLocation> LocationManager::search(const std::string& query) {
     return weatherService_.geocode(query);
 }

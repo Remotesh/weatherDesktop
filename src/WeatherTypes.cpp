@@ -77,6 +77,16 @@ const char* aqiCategory(double usAqi) {
     return "Hazardous";
 }
 
+const char* aqiHealthGuidance(double usAqi) {
+    if (usAqi < 0.0) return "";
+    if (usAqi <= 50.0) return "Good - air is clean, enjoy the outdoors.";
+    if (usAqi <= 100.0) return "Moderate - fine for most; sensitive folks ease up.";
+    if (usAqi <= 150.0) return "Sensitive groups: limit prolonged exertion.";
+    if (usAqi <= 200.0) return "Unhealthy - everyone limit prolonged exertion.";
+    if (usAqi <= 300.0) return "Very unhealthy - stay indoors if you can.";
+    return "Hazardous - avoid outdoor exertion.";
+}
+
 PressureTrend classifyPressureTrend(double deltaHpa) {
     if (deltaHpa >= 1.0) return PressureTrend::Rising;
     if (deltaHpa <= -1.0) return PressureTrend::Falling;
@@ -117,27 +127,61 @@ const char* weatherCodeToString(int code) {
     }
 }
 
+std::string dailyTakeaway(const WeatherData& data, bool useFahrenheit) {
+    // 1) Precipitation right now / imminent -- the most actionable.
+    PrecipNowcast nc = computePrecipNowcast(data);
+    if (nc.state == NowcastState::RainStarting)
+        return "Rain moving in soon - grab an umbrella.";
+    if (nc.state == NowcastState::RainOngoing)
+        return "Wet out there - keep the umbrella handy.";
+
+    // 2) Big temperature swing vs. yesterday.
+    if (data.hasYesterday && !data.daily.empty()) {
+        double deltaC = data.daily[0].tempMax - data.yesterdayTempMax;
+        double delta = useFahrenheit ? deltaC * 1.8 : deltaC;
+        if (delta >= 8.0) return "Noticeably warmer than yesterday.";
+        if (delta <= -8.0) return "Much cooler than yesterday - layer up.";
+    }
+
+    // 3) Strong sun.
+    if (!data.daily.empty() && data.daily[0].uvIndexMax >= 6.0)
+        return "Strong sun today - sunscreen if you're out midday.";
+
+    // 4) Gusty (>= ~30 mph / 48 km/h).
+    if (data.current.windGusts >= 48.0)
+        return "Breezy with gusty winds - secure loose items.";
+
+    // 5) Rain likely later today.
+    if (!data.daily.empty() && data.daily[0].precipProbMax >= 60.0)
+        return "Good chance of rain later - plan for it.";
+
+    // 6) Plain condition fallback.
+    return std::string(weatherCodeToString(data.current.weatherCode)) + " and steady.";
+}
+
 const char* weatherCodeToShortString(int code) {
+    // Short but real words (vs. consonant-mashed abbreviations) so the hourly
+    // column reads at a glance. Kept to <=7 chars to fit the column width.
     switch (code) {
         case 0:  return "Clear";
         case 1:  return "Clear";
-        case 2:  return "PtCld";
-        case 3:  return "Ovcst";
+        case 2:  return "PtCloud";        // partly cloudy
+        case 3:  return "Cloudy";         // overcast
         case 45: case 48: return "Fog";
-        case 51: case 53: case 55: return "Drzzl";
-        case 56: case 57: return "FzDrz";
+        case 51: case 53: case 55: return "Drizzle";
+        case 56: case 57: return "Sleet";  // freezing drizzle
         case 61: case 63: return "Rain";
-        case 65: return "HvRan";
-        case 66: case 67: return "FzRan";
+        case 65: return "HvyRain";
+        case 66: case 67: return "Sleet";  // freezing rain
         case 71: case 73: return "Snow";
-        case 75: return "HvSnw";
-        case 77: return "SnGrn";
-        case 80: case 81: return "Shwrs";
-        case 82: return "Storm";
-        case 85: case 86: return "SnShw";
-        case 95: return "TStrm";
+        case 75: return "HvySnow";
+        case 77: return "Snow";
+        case 80: case 81: return "Showers";
+        case 82: return "Showers";
+        case 85: case 86: return "SnowShw";
+        case 95: return "Storm";
         case 96: case 99: return "Hail";
-        default: return "???";
+        default: return "--";
     }
 }
 

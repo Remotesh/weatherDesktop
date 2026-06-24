@@ -19,7 +19,10 @@ TEST_CASE(weather_code_strings) {
     CHECK_STR_EQ(weatherCodeToString(99), "Severe Thunderstorm w/ Hail");
     CHECK_STR_EQ(weatherCodeToString(123456), "Unknown");
     CHECK_STR_EQ(weatherCodeToShortString(0), "Clear");
-    CHECK_STR_EQ(weatherCodeToShortString(123456), "???");
+    CHECK_STR_EQ(weatherCodeToShortString(3), "Cloudy");    // overcast -> readable
+    CHECK_STR_EQ(weatherCodeToShortString(80), "Showers");
+    CHECK_STR_EQ(weatherCodeToShortString(95), "Storm");
+    CHECK_STR_EQ(weatherCodeToShortString(123456), "--");
 }
 
 TEST_CASE(wind_direction_compass) {
@@ -48,6 +51,20 @@ TEST_CASE(geolocation_cache_key) {
     g.longitude = -122.67840;
     // name@lat,lon with 4 decimal places.
     CHECK_STR_EQ(g.cacheKey(), "Portland@45.5152,-122.6784");
+}
+
+TEST_CASE(geolocation_display_name_and_rename) {
+    GeoLocation g;
+    g.name = "Mylo";
+    g.admin1 = "North Dakota";
+    g.country = "US";
+    CHECK_STR_EQ(g.displayName(), "Mylo, North Dakota, US");
+    // After a rename the typed name is authoritative; region isn't appended,
+    // but country stays available (for the NWS alerts check).
+    g.name = "Cabin";
+    g.customLabel = true;
+    CHECK_STR_EQ(g.displayName(), "Cabin");
+    CHECK_STR_EQ(g.country, "US");
 }
 
 TEST_CASE(alert_dedup_key_official_vs_derived) {
@@ -144,4 +161,49 @@ TEST_CASE(pressure_trend_classification) {
     CHECK(classifyPressureTrend(-0.5) == PressureTrend::Steady);
     CHECK(classifyPressureTrend(-1.0) == PressureTrend::Falling);
     CHECK(classifyPressureTrend(-4.0) == PressureTrend::Falling);
+}
+
+TEST_CASE(aqi_health_guidance_bands) {
+    CHECK_STR_EQ(aqiHealthGuidance(-1.0), "");                       // no data
+    CHECK(std::string(aqiHealthGuidance(20.0)).find("Good") != std::string::npos);
+    CHECK(std::string(aqiHealthGuidance(80.0)).find("Moderate") != std::string::npos);
+    CHECK(std::string(aqiHealthGuidance(130.0)).find("Sensitive") != std::string::npos);
+    CHECK(std::string(aqiHealthGuidance(350.0)).find("Hazardous") != std::string::npos);
+}
+
+TEST_CASE(daily_takeaway_priority) {
+    // 1) Rain imminent wins over everything.
+    {
+        WeatherData d;
+        d.minutely = {step(0.0), step(0.0), step(0.4)};  // dry now, wet soon
+        CHECK(std::string(dailyTakeaway(d, true)).find("Rain") != std::string::npos);
+    }
+    // 2) Big warm swing (no rain).
+    {
+        WeatherData d;
+        d.hasYesterday = true;
+        d.yesterdayTempMax = 20.0;
+        DailyForecast day; day.tempMax = 26.0; day.uvIndexMax = 2.0;  // +6C -> +10.8F
+        d.daily.push_back(day);
+        CHECK(std::string(dailyTakeaway(d, true)).find("warmer") != std::string::npos);
+    }
+    // 3) High UV.
+    {
+        WeatherData d;
+        DailyForecast day; day.tempMax = 20.0; day.uvIndexMax = 8.0;
+        d.daily.push_back(day);
+        CHECK(std::string(dailyTakeaway(d, true)).find("sun") != std::string::npos);
+    }
+    // 4) Gusty.
+    {
+        WeatherData d;
+        d.current.windGusts = 60.0;  // km/h
+        CHECK(std::string(dailyTakeaway(d, true)).find("gusty") != std::string::npos);
+    }
+    // 6) Fallback to the condition text.
+    {
+        WeatherData d;
+        d.current.weatherCode = 3;  // Overcast
+        CHECK(std::string(dailyTakeaway(d, true)).find("steady") != std::string::npos);
+    }
 }

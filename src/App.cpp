@@ -174,7 +174,7 @@ bool App::initSDL() {
     window_ = SDL_CreateWindow(
         "Weather Desktop",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        960, 760,
+        1040, 820,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
     );
     if (!window_) return false;
@@ -235,8 +235,8 @@ bool App::initImGui() {
     fontCfg.SizePixels = 16.0f;
     io.Fonts->AddFontDefault(&fontCfg);
 
-    // Style: the kengine-site "Korra" palette, shared with filex.
-    theme::apply();
+    // Style: the kengine-site "Korra" palette (or the light variant), per config.
+    applyTheme();
 
     ImGui_ImplSDL2_InitForOpenGL(window_, glContext_);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -248,6 +248,25 @@ bool App::initImGui() {
     uiRenderer_->setIconAtlas(loadTexture(resourcePath("weather-icons.png")));
     uiRenderer_->setMoonAtlas(loadTexture(resourcePath("moon-phases.png")));
     return true;
+}
+
+void App::applyTheme() {
+    theme::ThemeId id = config_.themeId() == 1 ? theme::ThemeId::Light
+                                              : theme::ThemeId::Dark;
+    theme::apply(id);
+#ifdef _WIN32
+    if (hwnd_) {
+        bool light = (id == theme::ThemeId::Light);
+        BOOL dark = light ? FALSE : TRUE;
+        DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        COLORREF caption = light ? RGB(0xF3, 0xEC, 0xE2) : RGB(0x1B, 0x16, 0x13);
+        COLORREF text    = light ? RGB(0x2A, 0x21, 0x1B) : RGB(0xE6, 0xD6, 0xC4);
+        COLORREF border  = light ? RGB(0xCB, 0xB7, 0x9E) : RGB(0x5C, 0x3F, 0x29);
+        DwmSetWindowAttribute(hwnd_, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+        DwmSetWindowAttribute(hwnd_, DWMWA_TEXT_COLOR, &text, sizeof(text));
+        DwmSetWindowAttribute(hwnd_, DWMWA_BORDER_COLOR, &border, sizeof(border));
+    }
+#endif
 }
 
 bool App::initSystemTray() {
@@ -376,9 +395,12 @@ void App::backgroundWorkerLoop() {
                 weatherService_.enrichWeather(req.location, *weatherData);
                 std::vector<WeatherAlert> alerts;
                 if (req.alertsEnabled) {
-                    // Official (NWS) alerts first so they outrank our derived ones.
+                    // Official (NWS) alerts first so they outrank our derived ones,
+                    // then derived weather alerts, then informational sky events.
                     alerts = weatherService_.fetchOfficialAlerts(req.location);
                     alerts.insert(alerts.end(), derived.begin(), derived.end());
+                    auto sky = alertEngine_.evaluateSkyEvents(*weatherData, std::time(nullptr));
+                    alerts.insert(alerts.end(), sky.begin(), sky.end());
                 }
                 WorkResult r2;
                 r2.type = req.type;
@@ -483,6 +505,11 @@ void App::updateFromBackground() {
                 if (config_.alertsEnabled()) {
                     auto nowSys = std::chrono::system_clock::now();
                     for (auto& alert : activeAlerts_) {
+                        // Don't log an alert whose event has already passed (e.g.
+                        // a stale entry from a cached payload).
+                        bool expired = alert.validUntil.time_since_epoch().count() != 0
+                                       && alert.validUntil < nowSys;
+                        if (expired) continue;
                         if (!alertEngine_.wasRecentlyNotified(alert)) {
                             alertEngine_.markNotified(alert);
                             Notification n;
@@ -492,6 +519,43 @@ void App::updateFromBackground() {
                             unpoppedKeys_.insert(alert.deduplicationKey());
                         }
                     }
+                    // Rain-imminent push: fire once per onset when the minute
+                    // nowcast shows rain starting within ~30 min.
+                    if (config_.rainAlertsEnabled()) {
+                        PrecipNowcast nc = computePrecipNowcast(currentWeatherData_);
+                        if (nc.state == NowcastState::RainStarting && nc.minutes <= 30) {
+                            std::string onset;
+                            for (const auto& m : currentWeatherData_.minutely) {
+                                if (m.precipitation > 0.05) { onset = m.time; break; }
+                            }
+                            std::string key =
+                                currentWeatherData_.location.cacheKey() + "|" + onset;
+                            if (key != lastRainPushKey_) {
+                                lastRainPushKey_ = key;
+                                WeatherAlert a;
+                                a.type = AlertType::Rain;
+                                a.title = "Rain Soon";
+                                a.message = "Rain starting in ~" +
+                                    std::to_string(nc.minutes) + " min in " +
+                                    currentWeatherData_.location.name;
+                                a.locationName = currentWeatherData_.location.name;
+                                a.timestamp = nowSys;
+                                a.validUntil = nowSys + std::chrono::minutes(nc.minutes + 30);
+                                if (!alertEngine_.wasRecentlyNotified(a)) {
+                                    alertEngine_.markNotified(a);
+                                    Notification n;
+                                    n.alert = a;
+                                    n.time = nowSys;
+                                    notifications_.push_back(n);
+                                    unpoppedKeys_.insert(a.deduplicationKey());
+                                }
+                            }
+                        } else if (nc.state == NowcastState::Dry ||
+                                   nc.state == NowcastState::NoData) {
+                            lastRainPushKey_.clear();  // re-arm for the next onset
+                        }
+                    }
+
                     constexpr size_t kMaxHistory = 50;
                     if (notifications_.size() > kMaxHistory) {
                         notifications_.erase(
@@ -521,6 +585,21 @@ void App::updateFromBackground() {
             }
         }
     }
+}
+
+void App::pruneStaleNotifications() {
+    std::lock_guard<std::mutex> lock(dataMutex_);
+    auto now = std::chrono::system_clock::now();
+    auto isStale = [&](const Notification& n) {
+        return n.alert.validUntil.time_since_epoch().count() != 0 &&
+               n.alert.validUntil < now;
+    };
+    for (const auto& n : notifications_) {
+        if (isStale(n)) unpoppedKeys_.erase(n.alert.deduplicationKey());
+    }
+    notifications_.erase(
+        std::remove_if(notifications_.begin(), notifications_.end(), isStale),
+        notifications_.end());
 }
 
 void App::maybeNotify() {
@@ -630,8 +709,23 @@ void App::processEvents() {
                 requestWeatherUpdate(locationMgr_.activeLocation().geo);
             }
         }
+        if (actions.openRadarRequested && locationMgr_.hasLocations()) {
+            const GeoLocation& g = locationMgr_.activeLocation().geo;
+            radar_.toggle(g.latitude, g.longitude);
+        }
+        if (actions.editRequested && locationMgr_.hasLocations()) {
+            locationMgr_.updateActive(actions.editLocation);
+            {
+                // Reflect the edit immediately (name + coords) in the shown data.
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                currentWeatherData_.location = locationMgr_.activeLocation().geo;
+            }
+            // Coordinates may have changed -> fetch fresh weather for them.
+            requestWeatherUpdate(locationMgr_.activeLocation().geo);
+        }
         if (actions.settingsChanged) {
             config_.save();
+            applyTheme();  // cheap; picks up a theme change immediately
         }
         if (!actions.acknowledgeKey.empty()) {
             std::lock_guard<std::mutex> lock(dataMutex_);
@@ -667,6 +761,15 @@ void App::renderFrame() {
                             isLoading_, lastError_);
     }
 
+    // Radar overlay (its own ImGui window) when open.
+    if (radar_.isOpen()) {
+        const auto& cur = currentWeatherData_.current;
+        radar_.setWind(!currentWeatherData_.location.name.empty(),
+                       cur.windDirection, cur.windSpeed, cur.windGusts,
+                       config_.useMph());
+        radar_.render();
+    }
+
     ImGui::Render();
     ImGuiIO& io = ImGui::GetIO();
     glViewport(0, 0, static_cast<int>(io.DisplaySize.x), static_cast<int>(io.DisplaySize.y));
@@ -682,6 +785,7 @@ void App::run() {
     while (running_) {
         processEvents();
         updateFromBackground();
+        pruneStaleNotifications();  // drop notifications whose day has passed
         maybeNotify();  // pop queued alerts per the scheduler mode
 
         // Auto-poll check
@@ -708,6 +812,10 @@ void App::shutdown() {
     // ImGui/SDL teardown below never runs twice on already-freed state.
     if (shutdownDone_) return;
     shutdownDone_ = true;
+
+    // Close the radar (joins its thread + frees its GL textures) while the GL
+    // context is still alive.
+    radar_.close();
 
     // Stop background thread. Abort any in-flight HTTP transfer first so a fetch
     // mid-flight doesn't make join() wait out the request timeouts.

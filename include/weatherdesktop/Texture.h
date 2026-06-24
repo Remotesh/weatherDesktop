@@ -23,6 +23,10 @@ struct Texture {
 // how the (alpha-less) weather sprite sheet drops its dark cell background.
 Texture loadTexture(const std::string& path, bool colorKeyBackground = false);
 
+// Decode a PNG already in memory (radar tiles arrive as byte buffers) and upload
+// it as an RGBA GL texture. MUST be called on the GL thread. Invalid on failure.
+Texture loadTextureFromMemory(const unsigned char* data, size_t size);
+
 // Delete a previously loaded GL texture (safe to call on an invalid Texture).
 void freeTexture(Texture& tex);
 

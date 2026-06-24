@@ -7,6 +7,9 @@
 
 // Tray hover notifications (NOTIFYICON_VERSION_4). Defined here in case the
 // bundled SDK headers predate them.
+#ifndef NIN_BALLOONUSERCLICK
+#define NIN_BALLOONUSERCLICK (WM_USER + 5)
+#endif
 #ifndef NIN_POPUPOPEN
 #define NIN_POPUPOPEN (WM_USER + 6)
 #endif
@@ -111,6 +114,10 @@ bool SystemTray::handleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 hideFlyout();
                 return true;
             case WM_LBUTTONDBLCLK:
+                hideFlyout();
+                pendingAction_ = MenuAction::Show;
+                return true;
+            case NIN_BALLOONUSERCLICK:  // clicked an alert toast -> open the app
                 hideFlyout();
                 pendingAction_ = MenuAction::Show;
                 return true;

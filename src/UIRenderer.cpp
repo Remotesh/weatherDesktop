@@ -183,7 +183,7 @@ void UIRenderer::render(const WeatherData& data,
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Spacing();
-        renderTonight(data);
+        renderSkyCarousel(data);
         ImGui::EndChild();
 
         // Rule delineating the 7-day band from the scrollable top area.
@@ -197,6 +197,7 @@ void UIRenderer::render(const WeatherData& data,
     renderStatusBar(isLoading, errorMsg);
 
     if (showSearchPopup_) renderSearchPopup();
+    if (showEdit_) renderEditPopup();
     if (showSettings_) renderSettingsPopup();
     if (showNotifications_) renderNotificationCenter(history);
 
@@ -259,6 +260,18 @@ void UIRenderer::renderLocationBar(const WeatherData& data, int unreadCount) {
         }
     }
 
+    // Edit the active location (name + coordinates), prefilled with its current
+    // values.
+    ImGui::SameLine();
+    if (ImGui::SmallButton("edit")) {
+        const GeoLocation& g = locMgr_.activeLocation().geo;
+        showEdit_ = true;
+        std::snprintf(editNameBuf_, sizeof editNameBuf_, "%s", g.displayName().c_str());
+        editLat_ = g.latitude;
+        editLon_ = g.longitude;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Edit this location");
+
     // Timezone + local time line
     if (data.utcOffsetSeconds != 0 || data.fetchedAt.time_since_epoch().count() > 0) {
         int offsetSec = data.utcOffsetSeconds;
@@ -293,6 +306,7 @@ void UIRenderer::renderLocationBar(const WeatherData& data, int unreadCount) {
     float pad = ImGui::GetStyle().FramePadding.x * 2;
     float sp = ImGui::GetStyle().ItemSpacing.x;
     float groupW = ImGui::CalcTextSize("+").x + pad + sp +
+                   ImGui::CalcTextSize("Radar").x + pad + sp +
                    ImGui::CalcTextSize("Refresh").x + pad + sp +
                    ImGui::CalcTextSize("X").x + pad + sp +
                    ImGui::CalcTextSize(bell).x + pad;
@@ -305,6 +319,12 @@ void UIRenderer::renderLocationBar(const WeatherData& data, int unreadCount) {
         searchResults_.clear();
     }
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add location");
+    ImGui::SameLine();
+
+    if (ImGui::SmallButton("Radar")) {
+        pendingActions_.openRadarRequested = true;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open weather radar");
     ImGui::SameLine();
 
     if (ImGui::SmallButton("Refresh")) {
@@ -368,10 +388,10 @@ void UIRenderer::renderSearchPopup() {
         // Precise, lookup-free entry: type exact coordinates (privacy-centric --
         // nothing leaves the machine until the forecast itself is fetched).
         ImGui::Text("Or enter exact coordinates:");
-        ImGui::PushItemWidth(120);
-        ImGui::InputDouble("Lat", &manualLat_, 0.0, 0.0, "%.4f");
+        ImGui::PushItemWidth(130);
+        ImGui::InputDouble("Lat", &manualLat_, 0.0, 0.0, "%.6f");
         ImGui::SameLine();
-        ImGui::InputDouble("Lon", &manualLon_, 0.0, 0.0, "%.4f");
+        ImGui::InputDouble("Lon", &manualLon_, 0.0, 0.0, "%.6f");
         ImGui::PopItemWidth();
         ImGui::SetNextItemWidth(-1);
         ImGui::InputTextWithHint("##label", "Label (optional)", labelBuf_, sizeof(labelBuf_));
@@ -412,10 +432,110 @@ void UIRenderer::renderSearchPopup() {
     }
 }
 
+void UIRenderer::renderEditPopup() {
+    ImGui::OpenPopup("Edit Location");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Appearing);
+
+    if (ImGui::BeginPopupModal("Edit Location", &showEdit_,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted("Name:");
+        ImGui::SetNextItemWidth(-1);
+        bool submitted = ImGui::InputText("##editname", editNameBuf_, sizeof editNameBuf_,
+                                          ImGuiInputTextFlags_EnterReturnsTrue);
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Coordinates:");
+        ImGui::PushItemWidth(130);
+        ImGui::InputDouble("Lat", &editLat_, 0.0, 0.0, "%.6f");
+        ImGui::SameLine();
+        ImGui::InputDouble("Lon", &editLon_, 0.0, 0.0, "%.6f");
+        ImGui::PopItemWidth();
+
+        bool validCoords = editLat_ >= -90.0 && editLat_ <= 90.0 &&
+                           editLon_ >= -180.0 && editLon_ <= 180.0;
+        if (!validCoords) {
+            ImGui::TextColored(theme::Error, "Lat -90..90, Lon -180..180");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        bool save = (ImGui::Button("Save") || submitted) && validCoords &&
+                    editNameBuf_[0] != '\0';
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) showEdit_ = false;
+
+        // Delete sits apart, on the right, to avoid mis-clicks.
+        ImGui::SameLine();
+        float delW = ImGui::CalcTextSize("Delete location").x +
+                     ImGui::GetStyle().FramePadding.x * 2;
+        ImGui::SameLine(ImGui::GetWindowWidth() - delW - ImGui::GetStyle().WindowPadding.x);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::Error);
+        if (ImGui::Button("Delete location")) {
+            pendingActions_.removeLocationRequested = true;
+            showEdit_ = false;
+        }
+        ImGui::PopStyleColor();
+
+        if (save) {
+            // Preserve country/timezone/admin1 from the current location (country
+            // is used for the NWS check); apply the edited name + coordinates.
+            GeoLocation g = locMgr_.activeLocation().geo;
+            g.name = editNameBuf_;
+            g.customLabel = true;
+            g.latitude = editLat_;
+            g.longitude = editLon_;
+            pendingActions_.editLocation = g;
+            pendingActions_.editRequested = true;
+            showEdit_ = false;
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void UIRenderer::renderCurrentConditions(const WeatherData& data) {
+    // Static header (icon/temp/takeaway) over a scrollable metrics blob, so the
+    // growing pile of metrics scrolls without pushing the headline off-screen.
+    const ImGuiStyle& st = ImGui::GetStyle();
+    float w = ImGui::GetContentRegionAvail().x;
+    float availH = ImGui::GetContentRegionAvail().y;
+
+    bool hasIcon = iconAtlas_.valid() &&
+                   weatherCodeToIconCell(data.current.weatherCode, isNight_) >= 0;
+    float iconH = hasIcon ? std::min(std::max(w * 0.40f, 80.0f), 116.0f)
+                          : ImGui::GetTextLineHeight();
+    float lineH = ImGui::GetTextLineHeightWithSpacing();
+    std::string tk = dailyTakeaway(data, config_.useFahrenheit());
+    float tkH = ImGui::CalcTextSize(tk.c_str(), nullptr, false, w).y;
+    // Header = spacing + icon + spacing + temp line + takeaway(wrapped) + headline line.
+    float headH = st.ItemSpacing.y * 2 + iconH + lineH + tkH + lineH + 8.0f;
+
+    if (headH < availH - 60.0f) {
+        ImGui::BeginChild("curHead", ImVec2(0, headH), false, ImGuiWindowFlags_NoScrollbar);
+        renderCurrentHeader(data);
+        ImGui::EndChild();
+        ImGui::Separator();
+        ImGui::BeginChild("curMetrics", ImVec2(0, 0));
+        renderCurrentMetrics(data);
+        ImGui::EndChild();
+    } else {
+        // Window too short to split cleanly -- scroll the whole thing instead.
+        ImGui::BeginChild("curAll", ImVec2(0, 0));
+        renderCurrentHeader(data);
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        renderCurrentMetrics(data);
+        ImGui::EndChild();
+    }
+}
+
+void UIRenderer::renderCurrentHeader(const WeatherData& data) {
     const CurrentWeather& current = data.current;
     ImGui::Spacing();
-
     float w = ImGui::GetContentRegionAvail().x;
 
     // Large condition sprite, centered at the top (caption is baked in).
@@ -438,34 +558,28 @@ void UIRenderer::renderCurrentConditions(const WeatherData& data) {
     ImGui::SameLine();
     ImGui::TextDisabled("(feels like %s)", formatTemp(current.apparentTemp).c_str());
 
-    // "vs yesterday": today's forecast high against yesterday's (from past_days=1).
-    if (data.hasYesterday && !data.daily.empty()) {
-        double deltaC = data.daily[0].tempMax - data.yesterdayTempMax;
-        double delta = config_.useFahrenheit() ? deltaC * 1.8 : deltaC;
-        if (delta >= 1.0) {
-            ImGui::TextColored(theme::Amber, "Warmer than yesterday (+%.0f high)", delta);
-        } else if (delta <= -1.0) {
-            ImGui::TextColored(theme::Live, "Cooler than yesterday (%.0f high)", delta);
-        } else {
-            ImGui::TextDisabled("About the same as yesterday");
-        }
-    }
-
-    // Minute-by-minute precipitation nowcast ("rain starting in ~N min").
+    // One headline line: the precise rain nowcast when it's raining/imminent, else
+    // a synthesized "takeaway" for the day.
     PrecipNowcast nc = computePrecipNowcast(data);
-    if (nc.state == NowcastState::RainStarting) {
-        ImGui::TextColored(theme::Amber, "Rain starting in ~%d min", nc.minutes);
-    } else if (nc.state == NowcastState::RainStopping) {
-        ImGui::TextColored(theme::Live, "Rain stopping in ~%d min", nc.minutes);
-    } else if (nc.state == NowcastState::RainOngoing) {
-        ImGui::TextColored(theme::Amber, "Rain continuing for the next 2h");
-    } else if (nc.state == NowcastState::Dry) {
-        ImGui::TextDisabled("No rain in the next 2h");
+    bool rainNow = nc.state == NowcastState::RainStarting ||
+                   nc.state == NowcastState::RainStopping ||
+                   nc.state == NowcastState::RainOngoing;
+    if (rainNow) {
+        if (nc.state == NowcastState::RainStarting)
+            ImGui::TextColored(theme::Amber, "Rain starting in ~%d min", nc.minutes);
+        else if (nc.state == NowcastState::RainStopping)
+            ImGui::TextColored(theme::Live, "Rain stopping in ~%d min", nc.minutes);
+        else
+            ImGui::TextColored(theme::Amber, "Rain continuing for the next 2h");
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::Accent);
+        ImGui::TextWrapped("%s", dailyTakeaway(data, config_.useFahrenheit()).c_str());
+        ImGui::PopStyleColor();
     }
+}
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
+void UIRenderer::renderCurrentMetrics(const WeatherData& data) {
+    const CurrentWeather& current = data.current;
 
     // Metrics laid out in two columns to keep the card compact and fully visible.
     struct Metric { std::string text; ImVec4 color; bool colored; };
@@ -562,10 +676,157 @@ static void drawMoon(ImVec2 c, float R, const MoonInfo& m) {
     dl->AddCircle(c, R, rim, 48, 1.5f);
 }
 
-void UIRenderer::renderTonight(const WeatherData& data) {
-    ImGui::TextDisabled("SKY");
+void UIRenderer::renderSkyCarousel(const WeatherData& data) {
+    // Per-frame available cards (some appear only when their data is present).
+    struct Tab { SkyCard card; const char* label; };
+    std::vector<Tab> tabs;
+    tabs.push_back({SkyCard::Sky, "Sky"});
+    if (data.airQuality.valid && data.airQuality.usAqi >= 0.0)
+        tabs.push_back({SkyCard::Air, "Air"});
+    if (data.tides.valid) tabs.push_back({SkyCard::Tides, "Tides"});
+    if (data.normals.valid) tabs.push_back({SkyCard::Almanac, "Almanac"});
+    if (!data.afdText.empty()) tabs.push_back({SkyCard::Discussion, "Discussion"});
+
+    int n = static_cast<int>(tabs.size());
+    if (skyCard_ >= n) skyCard_ = 0;
+
+    // ASCII tab strip; active tab in amber. A manual pick pauses auto-rotate.
+    for (int i = 0; i < n; ++i) {
+        if (i > 0) ImGui::SameLine();
+        bool active = (i == skyCard_);
+        if (active) ImGui::PushStyleColor(ImGuiCol_Text, theme::Amber);
+        char lbl[24];
+        std::snprintf(lbl, sizeof lbl, "[ %s ]", tabs[i].label);
+        if (ImGui::SmallButton(lbl)) {
+            skyCard_ = i;
+            skyAutoAdvance_ = false;
+            skyDwell_ = 0.0f;
+        }
+        if (active) ImGui::PopStyleColor();
+    }
+    if (!skyAutoAdvance_ && n > 1) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("[auto]")) { skyAutoAdvance_ = true; skyDwell_ = 0.0f; }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Resume auto-rotate");
+    }
+
     ImGui::Spacing();
 
+    ImGui::BeginChild("skyBody", ImVec2(0, 0));
+    bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+    switch (tabs[skyCard_].card) {
+        case SkyCard::Sky: renderSkyCardSky(data); break;
+        case SkyCard::Air: renderSkyCardAir(data); break;
+        case SkyCard::Discussion: renderSkyCardDiscussion(data); break;
+        case SkyCard::Almanac: renderSkyCardAlmanac(data); break;
+        case SkyCard::Tides: renderSkyCardTides(data); break;
+    }
+    ImGui::EndChild();
+
+    // Auto-advance after the configured dwell, unless paused/hovered/single-card.
+    int dwell = config_.carouselSeconds();
+    if (skyAutoAdvance_ && !hovered && n > 1 && dwell > 0) {
+        skyDwell_ += ImGui::GetIO().DeltaTime;
+        if (skyDwell_ >= static_cast<float>(dwell)) {
+            skyDwell_ = 0.0f;
+            skyCard_ = (skyCard_ + 1) % n;
+        }
+    } else {
+        skyDwell_ = 0.0f;
+    }
+}
+
+void UIRenderer::renderSkyCardAir(const WeatherData& data) {
+    const AirQuality& aq = data.airQuality;
+    double aqi = aq.usAqi;
+    ImVec4 col = aqi <= 50.0 ? theme::Live : aqi <= 100.0 ? theme::Amber : theme::Error;
+
+    ImGui::TextColored(col, "US AQI %.0f  (%s)", aqi, aqiCategory(aqi));
+    ImGui::SameLine();
+    ImGui::TextDisabled("ug/m3:");
+
+    // Compact 3-column pollutant grid -> two rows, no vertical scroll needed.
+    if (ImGui::BeginTable("pollutants", 3, ImGuiTableFlags_SizingStretchSame)) {
+        auto cell = [&](const char* label, double v) {
+            ImGui::TableNextColumn();
+            if (v < 0.0) ImGui::TextDisabled("%s --", label);
+            else ImGui::Text("%s %.0f", label, v);
+        };
+        cell("PM2.5", aq.pm2_5);
+        cell("PM10", aq.pm10);
+        cell("O3", aq.ozone);
+        cell("NO2", aq.no2);
+        cell("SO2", aq.so2);
+        cell("CO", aq.co);
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    const char* g = aqiHealthGuidance(aqi);
+    if (g && g[0]) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme::Dim);
+        ImGui::TextWrapped("%s", g);
+        ImGui::PopStyleColor();
+    }
+}
+
+void UIRenderer::renderSkyCardDiscussion(const WeatherData& data) {
+    if (!data.afdOffice.empty()) {
+        std::string sub = "WFO " + data.afdOffice;
+        std::string issued = formatClock(data.afdIssued);
+        if (!issued.empty()) sub += "  -  issued " + issued;
+        ImGui::TextDisabled("%s", sub.c_str());
+    }
+    // Preformatted NWS text -- keep the meteorologist's line breaks (monospace
+    // font), so show it verbatim with scroll rather than reflowing it.
+    ImGui::BeginChild("afdScroll", ImVec2(0, 0), false,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::TextUnformatted(data.afdText.c_str());
+    ImGui::EndChild();
+}
+
+void UIRenderer::renderSkyCardAlmanac(const WeatherData& data) {
+    const ClimateNormals& nm = data.normals;
+    ImGui::Text("Normal: high %s / low %s", formatTemp(nm.normalHighC).c_str(),
+                formatTemp(nm.normalLowC).c_str());
+    ImGui::Spacing();
+    if (!data.daily.empty()) {
+        double deltaC = data.daily[0].tempMax - nm.normalHighC;
+        double delta = config_.useFahrenheit() ? deltaC * 1.8 : deltaC;
+        if (delta >= 1.0)
+            ImGui::TextColored(theme::Amber, "Today's high runs %.0f above average", delta);
+        else if (delta <= -1.0)
+            ImGui::TextColored(theme::Live, "Today's high runs %.0f below average", -delta);
+        else
+            ImGui::TextDisabled("Today's high is about average.");
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("(average for this date, 2014-2023)");
+}
+
+void UIRenderer::renderSkyCardTides(const WeatherData& data) {
+    const TideInfo& t = data.tides;
+    bool useFt = config_.useFahrenheit();
+    if (t.hasTides) {
+        if (!t.stationName.empty()) ImGui::TextDisabled("%s", t.stationName.c_str());
+        for (const auto& e : t.events) {
+            const char* kind = e.high ? "High" : "Low ";
+            if (useFt)
+                ImGui::Text("%s  %s  (%.1f ft)", kind, e.time.c_str(), e.heightM * 3.28084);
+            else
+                ImGui::Text("%s  %s  (%.1f m)", kind, e.time.c_str(), e.heightM);
+        }
+    }
+    if (t.waveHeightM >= 0.0) {
+        if (t.hasTides) ImGui::Spacing();
+        if (useFt) ImGui::Text("Waves ~%.1f ft", t.waveHeightM * 3.28084);
+        else ImGui::Text("Waves ~%.1f m", t.waveHeightM);
+    }
+    if (!t.hasTides && t.waveHeightM < 0.0)
+        ImGui::TextDisabled("No tide / marine data here.");
+}
+
+void UIRenderer::renderSkyCardSky(const WeatherData& data) {
     std::time_t now = std::time(nullptr);
     MoonInfo moon = computeMoon(now);
 
@@ -590,28 +851,21 @@ void UIRenderer::renderTonight(const WeatherData& data) {
     ImGui::TextDisabled("%.0f%% illuminated", moon.illumination * 100.0);
     ImGui::Spacing();
 
-    // Aurora chance from the Kp index + latitude.
+    // Aurora -- shown only when there's an actual chance worth mentioning
+    // (hidden on the common "no data / unlikely" nights to cut clutter).
     AuroraChance ac = auroraChance(data.kpIndex, data.location.latitude);
-    ImGui::TextUnformatted("Aurora:");
-    ImGui::SameLine();
-    if (ac == AuroraChance::Unknown) {
-        ImGui::TextDisabled("--");
-    } else {
-        ImVec4 col = (ac == AuroraChance::Likely)     ? theme::Live
-                     : (ac == AuroraChance::Possible) ? theme::Amber
-                                                      : theme::Dim;
+    if (ac == AuroraChance::Possible || ac == AuroraChance::Likely) {
+        ImVec4 col = (ac == AuroraChance::Likely) ? theme::Live : theme::Amber;
+        ImGui::TextUnformatted("Aurora:");
+        ImGui::SameLine();
         ImGui::TextColored(col, "%s", auroraChanceLabel(ac));
         ImGui::SameLine();
         ImGui::TextDisabled("(Kp %.0f)", data.kpIndex);
     }
 
-    // Active meteor shower (closest to peak).
+    // Meteors -- shown only when a shower is actually active/approaching.
     auto showers = activeMeteorShowers(now);
-    if (showers.empty()) {
-        ImGui::TextUnformatted("Meteors:");
-        ImGui::SameLine();
-        ImGui::TextDisabled("none active");
-    } else {
+    if (!showers.empty()) {
         const ActiveShower& s = showers.front();
         if (s.nearPeak) {
             ImGui::TextColored(theme::Amber, "Meteors: %s, near peak", s.name);
@@ -803,8 +1057,9 @@ void UIRenderer::renderHourlyForecast(const std::vector<HourlyForecast>& hourly)
 
     // Everything in this card is positioned from these two constants, so the
     // chart points, the column dividers, and every text row share one stride and
-    // line up exactly (no auto-sizing table to compress them).
-    const float colW = 52.0f;
+    // line up exactly (no auto-sizing table to compress them). Wide enough for
+    // the readable condition words (e.g. "Showers", "PtCloud").
+    const float colW = 64.0f;
     const float leftPad = 6.0f;
 
     const ImGuiStyle& st = ImGui::GetStyle();
@@ -886,6 +1141,8 @@ void UIRenderer::renderDailyForecast(const std::vector<DailyForecast>& daily) {
     if (daily.empty()) return;
 
     ImGui::Text("7-Day Forecast");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(hi/lo  -  confidence  -  rain%%)");
     ImGui::Spacing();
 
     int cols = std::min<int>(7, static_cast<int>(daily.size()));
@@ -1144,10 +1401,26 @@ void UIRenderer::renderSettingsPopup() {
             pendingActions_.settingsChanged = true;
         }
 
+        int themeId = config_.themeId();
+        const char* themes[] = {"Dark (Korra)", "Light"};
+        ImGui::SetNextItemWidth(160);
+        if (ImGui::Combo("Theme", &themeId, themes, 2)) {
+            config_.setThemeId(themeId);
+            pendingActions_.settingsChanged = true;
+        }
+
         bool alerts = config_.alertsEnabled();
         if (ImGui::Checkbox("Enable Alerts", &alerts)) {
             config_.setAlertsEnabled(alerts);
             pendingActions_.settingsChanged = true;
+        }
+
+        if (config_.alertsEnabled()) {
+            bool rain = config_.rainAlertsEnabled();
+            if (ImGui::Checkbox("Rain-starting alerts", &rain)) {
+                config_.setRainAlertsEnabled(rain);
+                pendingActions_.settingsChanged = true;
+            }
         }
 
         // Notification scheduler (only meaningful when alerts are on).
@@ -1204,6 +1477,25 @@ void UIRenderer::renderSettingsPopup() {
             config_.setStartMinimized(startMin);
             pendingActions_.settingsChanged = true;
         }
+
+        // SKY-carousel auto-rotate interval (0 disables rotation).
+        int carousel = config_.carouselSeconds();
+        ImGui::SetNextItemWidth(80);
+        if (ImGui::InputInt("Sky rotate (s, 0=off)", &carousel, 1, 5)) {
+            if (carousel < 0) carousel = 0;
+            if (carousel > 120) carousel = 120;
+            config_.setCarouselSeconds(carousel);
+            pendingActions_.settingsChanged = true;
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled(
+            "Data: weather/air quality by Open-Meteo (CC BY 4.0); alerts & "
+            "discussion by US NWS; tides by NOAA; radar by RainViewer; "
+            "basemap by Natural Earth.");
+        ImGui::PopTextWrapPos();
 
         ImGui::Spacing();
         if (ImGui::Button("Save & Close")) {

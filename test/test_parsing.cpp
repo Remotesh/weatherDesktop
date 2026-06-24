@@ -171,18 +171,44 @@ TEST_CASE(parse_forecast_pastdays_locates_today) {
 
 TEST_CASE(parse_air_quality) {
     const char* json = R"({
-      "current": {"us_aqi": 42, "european_aqi": 30, "pm2_5": 9.1, "pm10": 14.0, "ozone": 60}
+      "current": {"us_aqi": 42, "european_aqi": 30, "pm2_5": 9.1, "pm10": 14.0,
+                  "ozone": 60, "nitrogen_dioxide": 12.3, "sulphur_dioxide": 2.1,
+                  "carbon_monoxide": 140}
     })";
     AirQuality aq = WeatherService::parseAirQuality(json);
     CHECK(aq.valid);
     CHECK_NEAR(aq.usAqi, 42.0, 1e-9);
     CHECK_NEAR(aq.pm2_5, 9.1, 1e-6);
+    CHECK_NEAR(aq.no2, 12.3, 1e-6);
+    CHECK_NEAR(aq.so2, 2.1, 1e-6);
+    CHECK_NEAR(aq.co, 140.0, 1e-6);
     CHECK_STR_EQ(aqiCategory(aq.usAqi), "Good");
 }
 
 TEST_CASE(parse_air_quality_empty_is_invalid) {
     AirQuality aq = WeatherService::parseAirQuality(R"({"latitude": 45.0})");
     CHECK_FALSE(aq.valid);
+}
+
+TEST_CASE(parse_climate_normals_averages_matching_day) {
+    // Only the 06-22 rows should be averaged (06-21 and 07-01 ignored).
+    const char* json = R"({
+      "daily": {
+        "time": ["2014-06-21", "2014-06-22", "2015-06-22", "2016-06-22", "2016-07-01"],
+        "temperature_2m_max": [30.0, 20.0, 22.0, 24.0, 99.0],
+        "temperature_2m_min": [10.0, 12.0, 14.0, 16.0, 50.0]
+      }
+    })";
+    ClimateNormals n = WeatherService::parseClimateNormals(json, "06-22");
+    CHECK(n.valid);
+    CHECK_NEAR(n.normalHighC, 22.0, 1e-6);  // (20+22+24)/3
+    CHECK_NEAR(n.normalLowC, 14.0, 1e-6);   // (12+14+16)/3
+}
+
+TEST_CASE(parse_climate_normals_no_match_is_invalid) {
+    const char* json = R"({"daily":{"time":["2014-01-01"],
+      "temperature_2m_max":[5.0],"temperature_2m_min":[1.0]}})";
+    CHECK_FALSE(WeatherService::parseClimateNormals(json, "06-22").valid);
 }
 
 TEST_CASE(parse_forecast_error_body_throws) {

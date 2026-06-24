@@ -45,7 +45,10 @@ bool Config::load() {
             foregroundPollMin_ = s.value("foregroundPollMinutes", 15);
             backgroundPollMin_ = s.value("backgroundPollMinutes", 30);
             alertsEnabled_ = s.value("alertsEnabled", true);
+            rainAlertsEnabled_ = s.value("rainAlertsEnabled", true);
             startMinimized_ = s.value("startMinimized", false);
+            carouselSeconds_ = s.value("carouselSeconds", 10);
+            themeId_ = s.value("themeId", 0);
             int mode = s.value("notifyMode", 0);
             if (mode < 0 || mode > 2) mode = 0;
             notifyMode_ = static_cast<NotifyMode>(mode);
@@ -66,6 +69,7 @@ bool Config::load() {
                 loc.geo.latitude = locJ.value("latitude", 0.0);
                 loc.geo.longitude = locJ.value("longitude", 0.0);
                 loc.geo.timezone = locJ.value("timezone", "");
+                loc.geo.customLabel = locJ.value("customLabel", false);
                 loc.isDefault = locJ.value("isDefault", false);
                 locations_.push_back(std::move(loc));
             }
@@ -98,7 +102,10 @@ bool Config::save() const {
         {"foregroundPollMinutes", foregroundPollMin_},
         {"backgroundPollMinutes", backgroundPollMin_},
         {"alertsEnabled", alertsEnabled_},
+        {"rainAlertsEnabled", rainAlertsEnabled_},
         {"startMinimized", startMinimized_},
+        {"carouselSeconds", carouselSeconds_},
+        {"themeId", themeId_},
         {"notifyMode", static_cast<int>(notifyMode_)},
         {"quietStartMinute", quietStartMin_},
         {"quietEndMinute", quietEndMin_},
@@ -115,6 +122,7 @@ bool Config::save() const {
             {"latitude", loc.geo.latitude},
             {"longitude", loc.geo.longitude},
             {"timezone", loc.geo.timezone},
+            {"customLabel", loc.geo.customLabel},
             {"isDefault", loc.isDefault}
         });
     }
@@ -129,6 +137,12 @@ bool Config::save() const {
 void Config::addLocation(const SavedLocation& loc) {
     locations_.push_back(loc);
     if (locations_.size() == 1) activeIndex_ = 0;
+    save();
+}
+
+void Config::updateLocation(size_t index, const GeoLocation& geo) {
+    if (index >= locations_.size()) return;
+    locations_[index].geo = geo;
     save();
 }
 

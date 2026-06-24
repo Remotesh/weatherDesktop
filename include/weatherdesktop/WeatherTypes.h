@@ -13,8 +13,12 @@ struct GeoLocation {
     double latitude = 0.0;
     double longitude = 0.0;
     std::string timezone;
+    // When the user has renamed this location, `name` is the full label and the
+    // region parts are not appended (but `country` is kept for the NWS check).
+    bool customLabel = false;
 
     std::string displayName() const {
+        if (customLabel) return name;
         std::string result = name;
         if (!admin1.empty()) result += ", " + admin1;
         if (!country.empty()) result += ", " + country;
@@ -87,6 +91,29 @@ struct HourlyForecast {
     double windDirection = 0.0;     // degrees
 };
 
+// 30-ish-year climate normal for today's date (Open-Meteo archive, no key).
+struct ClimateNormals {
+    bool valid = false;
+    double normalHighC = 0.0;
+    double normalLowC = 0.0;
+};
+
+// One predicted tide extreme.
+struct TideEvent {
+    std::string time;     // local clock "3:42 PM"
+    bool high = false;    // high vs low tide
+    double heightM = 0.0;
+};
+
+// Tides (NOAA CO-OPS, US coastal) + wave height (Open-Meteo Marine, global).
+struct TideInfo {
+    bool valid = false;            // true if either tides or waves are present
+    bool hasTides = false;
+    std::string stationName;
+    std::vector<TideEvent> events; // upcoming high/low extremes
+    double waveHeightM = -1.0;     // <0 = no wave data
+};
+
 // Air quality snapshot (Open-Meteo Air Quality API, no key). valid==false when
 // the best-effort fetch failed. Negative members mean "not reported".
 struct AirQuality {
@@ -96,6 +123,9 @@ struct AirQuality {
     double pm2_5 = -1.0;   // ug/m3
     double pm10 = -1.0;    // ug/m3
     double ozone = -1.0;   // ug/m3
+    double no2 = -1.0;     // nitrogen dioxide, ug/m3
+    double so2 = -1.0;     // sulphur dioxide, ug/m3
+    double co = -1.0;      // carbon monoxide, ug/m3
 };
 
 struct WeatherData {
@@ -105,6 +135,11 @@ struct WeatherData {
     std::vector<DailyForecast> daily;
     std::vector<MinutelyForecast> minutely;  // 15-min precip nowcast (next ~2h)
     AirQuality airQuality;
+    ClimateNormals normals;
+    TideInfo tides;
+    std::string afdText;    // NWS Area Forecast Discussion (US); empty otherwise
+    std::string afdOffice;  // issuing WFO (e.g. "OKX")
+    std::string afdIssued;  // issuance time (ISO)
     int utcOffsetSeconds = 0;
     double kpIndex = -1.0;  // NOAA planetary Kp (for aurora); <0 = no data
 
@@ -144,7 +179,8 @@ enum class AlertType {
     Hail,
     HighWind,
     FreezingPrecipitation,
-    Official   // issued by an official agency (e.g. US NWS), not derived locally
+    Official,  // issued by an official agency (e.g. US NWS), not derived locally
+    SkyEvent   // informational: meteor shower / aurora / good stargazing
 };
 
 struct WeatherAlert {
@@ -160,6 +196,10 @@ struct WeatherAlert {
     bool official = false;
     std::string id;
     std::string severity;  // e.g. "Extreme", "Severe", "Moderate" (official only)
+
+    // When the alert's event has fully passed. Zero (epoch) means "no expiry".
+    // Used to stop counting / prune notifications once their day is gone.
+    std::chrono::system_clock::time_point validUntil{};
 
     std::string deduplicationKey() const;
 };
@@ -200,6 +240,13 @@ const char* uvCategory(double uv);
 
 // US AQI band ("Good".."Hazardous"). Returns "--" for a negative/no-data value.
 const char* aqiCategory(double usAqi);
+
+// One-sentence health guidance for a US AQI value (who should take care).
+const char* aqiHealthGuidance(double usAqi);
+
+// A single human-readable "takeaway" line for the day, picked by priority from
+// the current/forecast data (precip onset, big swing, high UV, gusts, condition).
+std::string dailyTakeaway(const WeatherData& data, bool useFahrenheit);
 
 enum class PressureTrend { Falling, Steady, Rising };
 // Classify a 3-hour barometric change (hPa): |delta| < 1 is steady.

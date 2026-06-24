@@ -23,6 +23,7 @@ public:
     const std::vector<SavedLocation>& locations() const { return locations_; }
     void addLocation(const SavedLocation& loc);
     void removeLocation(size_t index);
+    void updateLocation(size_t index, const GeoLocation& geo);
     int activeLocationIndex() const { return activeIndex_; }
     void setActiveLocationIndex(int idx);
 
@@ -35,8 +36,15 @@ public:
     int backgroundPollMinutes() const { return backgroundPollMin_; }
     bool alertsEnabled() const { return alertsEnabled_; }
     void setAlertsEnabled(bool v) { alertsEnabled_ = v; }
+    bool rainAlertsEnabled() const { return rainAlertsEnabled_; }
+    void setRainAlertsEnabled(bool v) { rainAlertsEnabled_ = v; }
     bool startMinimized() const { return startMinimized_; }
     void setStartMinimized(bool v) { startMinimized_ = v; }
+    // Seconds each SKY-carousel card is shown before auto-advancing (0 = off).
+    int carouselSeconds() const { return carouselSeconds_; }
+    void setCarouselSeconds(int v) { carouselSeconds_ = v; }
+    int themeId() const { return themeId_; }       // 0 = dark, 1 = light
+    void setThemeId(int v) { themeId_ = v; }
 
     // Notification scheduling. Times are minutes since local midnight.
     NotifyMode notifyMode() const { return notifyMode_; }
@@ -60,7 +68,10 @@ private:
     int foregroundPollMin_ = 15;
     int backgroundPollMin_ = 30;
     bool alertsEnabled_ = true;
+    bool rainAlertsEnabled_ = true;
     bool startMinimized_ = false;
+    int carouselSeconds_ = 10;
+    int themeId_ = 0;
 
     NotifyMode notifyMode_ = NotifyMode::Immediate;
     int quietStartMin_ = 22 * 60;  // 22:00
